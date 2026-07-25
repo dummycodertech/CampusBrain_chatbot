@@ -9,6 +9,7 @@ header inherits the subject of the most recent page that had one
 independently from content alone.
 """
 import json
+import re
 import time
 from typing import List, Dict
 from PIL import Image
@@ -27,6 +28,28 @@ Known subjects for this bundle (if the header matches one, use this exact name):
 """
 
 
+def _get_retry_delay(e: Exception, default: int = 60) -> int:
+    """Extract retryDelay from a Gemini ClientError response, or return a default."""
+    try:
+        # e.args[0] may be a string like "429 RESOURCE_EXHAUSTED. {...}"
+        err_str = str(e)
+        # Try to find retryDelay in the error details
+        match = re.search(r"retryDelay.*?(\d+)s", err_str)
+        if match:
+            return int(match.group(1)) + 5  # add 5s buffer
+        # Also check structured response attribute
+        details = getattr(e, "response", None)
+        if details:
+            for detail in getattr(details, "get", lambda *a: {})('details', []):
+                if 'retryDelay' in str(detail):
+                    m = re.search(r'(\d+)s', str(detail.get('retryDelay', '')))
+                    if m:
+                        return int(m.group(1)) + 5
+    except Exception:
+        pass
+    return default
+
+
 def tag_and_extract_page(image: Image.Image, known_subjects: List[str]) -> dict:
     prompt = TAG_PROMPT.format(known_subjects=", ".join(known_subjects) or "unknown")
     # Retry up to 3 times on quota errors (429) with backoff
@@ -35,14 +58,15 @@ def tag_and_extract_page(image: Image.Image, known_subjects: List[str]) -> dict:
             raw = generate_vision([prompt, image])
             break
         except Exception as e:
-            # Streamlit masks error strings, so we check the class name or code directly
+            # Detect rate limit by class name, status code attribute, or string
             is_rate_limit = (
-                type(e).__name__ in ["ClientError", "APIError", "ResourceExhausted"] 
+                type(e).__name__ in ["ClientError", "APIError", "ResourceExhausted"]
                 or getattr(e, "code", None) == 429
                 or "429" in str(e)
+                or "RESOURCE_EXHAUSTED" in str(e)
             )
             if is_rate_limit and attempt < 2:
-                wait = 60 * (attempt + 1)  # 60s, then 120s
+                wait = _get_retry_delay(e, default=60 * (attempt + 1))
                 print(f"[ocr_tagger] Rate limited (attempt {attempt+1}), retrying in {wait}s...")
                 time.sleep(wait)
             else:

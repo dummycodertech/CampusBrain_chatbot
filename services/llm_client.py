@@ -14,7 +14,7 @@ from google import genai
 from groq import Groq
 
 _gemini_client = None
-VISION_MODEL = "gemini-3.5-flash"
+VISION_MODEL = "gemini-2.0-flash"
 
 
 def _get_gemini_client() -> genai.Client:
