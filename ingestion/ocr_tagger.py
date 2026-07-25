@@ -35,9 +35,15 @@ def tag_and_extract_page(image: Image.Image, known_subjects: List[str]) -> dict:
             raw = generate_vision([prompt, image])
             break
         except Exception as e:
-            if "429" in str(e) and attempt < 2:
+            # Streamlit masks error strings, so we check the class name or code directly
+            is_rate_limit = (
+                type(e).__name__ in ["ClientError", "APIError", "ResourceExhausted"] 
+                or getattr(e, "code", None) == 429
+                or "429" in str(e)
+            )
+            if is_rate_limit and attempt < 2:
                 wait = 60 * (attempt + 1)  # 60s, then 120s
-                print(f"[ocr_tagger] Rate limited, retrying in {wait}s...")
+                print(f"[ocr_tagger] Rate limited (attempt {attempt+1}), retrying in {wait}s...")
                 time.sleep(wait)
             else:
                 raise
