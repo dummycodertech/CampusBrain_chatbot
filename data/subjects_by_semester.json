@@ -1,0 +1,119 @@
+{
+  "_comment": "Fill this from your official curriculum handbook -- one-time setup, not per-upload. Key format is '<branch>-<semester>', e.g. 'IT-3'. This is what ingestion uses instead of asking the frontend for a subject array. Includes both IT and CSE branches with standard electives for Sem 6 & 7.",
+  "IT-1": [
+    "Applied Mathematics-I",
+    "Applied Physics-I",
+    "Manufacturing Processes",
+    "Electrical Technology",
+    "Human Values and Professional Ethics",
+    "Fundamentals of Computing",
+    "Applied Chemistry"
+  ],
+  "IT-2": [
+    "Applied Mathematics-II",
+    "Applied Physics-II",
+    "Electronic Devices",
+    "Introduction to Programming",
+    "Engineering Mechanics",
+    "Communication Skills",
+    "Environmental Studies"
+  ],
+  "IT-3": [
+    "Computational Methods",
+    "Discrete Mathematics",
+    "Digital Logic and Computer Design",
+    "Data Structures",
+    "Object-Oriented Programming using C++",
+    "Indian Knowledge System"
+  ],
+  "IT-4": [
+    "Probability, Statistics and Linear Programming",
+    "Theory of Computation",
+    "Circuits and Systems",
+    "Database Management Systems",
+    "Programming in Java",
+    "Technical Writing"
+  ],
+  "IT-5": [
+    "Economics for Engineers",
+    "Compiler Design",
+    "Operating Systems",
+    "Computer Networks",
+    "Software Engineering",
+    "Design and Analysis of Algorithm"
+  ],
+  "IT-6": [
+    "Principles of Management for Engineers",
+    "Universal Human Values",
+    "Web Technology",
+    "Artificial Intelligence",
+    "Microprocessors and Microcontrollers",
+    "Information Theory and Coding"
+  ],
+  "IT-7": [
+    "Principles of Entrepreneurship Mindset",
+    "Cryptography and Network Security",
+    "Cloud Computing",
+    "Machine Learning",
+    "Wireless Communication",
+    "Advanced Database Management Systems"
+  ],
+  "CSE-1": [
+    "Applied Mathematics-I",
+    "Applied Physics-I",
+    "Manufacturing Processes",
+    "Electrical Technology",
+    "Human Values and Professional Ethics",
+    "Fundamentals of Computing",
+    "Applied Chemistry"
+  ],
+  "CSE-2": [
+    "Applied Mathematics-II",
+    "Applied Physics-II",
+    "Electronic Devices",
+    "Introduction to Programming",
+    "Engineering Mechanics",
+    "Communication Skills",
+    "Environmental Studies"
+  ],
+  "CSE-3": [
+    "Computational Methods",
+    "Discrete Mathematics",
+    "Digital Logic and Computer Design",
+    "Data Structures",
+    "Object-Oriented Programming using C++",
+    "Indian Knowledge System"
+  ],
+  "CSE-4": [
+    "Probability, Statistics and Linear Programming",
+    "Theory of Computation",
+    "Circuits and Systems",
+    "Database Management Systems",
+    "Programming in Java",
+    "Technical Writing"
+  ],
+  "CSE-5": [
+    "Economics for Engineers",
+    "Compiler Design",
+    "Operating Systems",
+    "Computer Networks",
+    "Software Engineering",
+    "Design and Analysis of Algorithm"
+  ],
+  "CSE-6": [
+    "Principles of Management for Engineers",
+    "Universal Human Values",
+    "Machine Learning",
+    "Computer Graphics and Multimedia",
+    "Microprocessors and Microcontrollers",
+    "Artificial Intelligence"
+  ],
+  "CSE-7": [
+    "Principles of Entrepreneurship Mindset",
+    "Cryptography and Network Security",
+    "Cloud Computing",
+    "Deep Learning",
+    "Internet of Things",
+    "Software Testing and Quality Assurance"
+  ]
+}
