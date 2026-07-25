@@ -83,9 +83,11 @@ def tag_and_extract_all(images: List[Image.Image], known_subjects: List[str]) ->
     results = []
     current_subject = None
     for i, image in enumerate(images, start=1):
-        if i > 1:
-            # Stay within free-tier 5 RPM cap (1 request per 13s)
-            time.sleep(13)
+        # gemini-2.0-flash free tier: 15 RPM → safe at 1 request per 5s (12 RPM)
+        # Add a small delay even before page 1 to avoid collisions with prior requests
+        sleep_time = 2 if i == 1 else 5
+        time.sleep(sleep_time)
+
         parsed = tag_and_extract_page(image, known_subjects)
         if parsed.get("has_new_subject_header") and parsed.get("subject"):
             current_subject = parsed["subject"]
