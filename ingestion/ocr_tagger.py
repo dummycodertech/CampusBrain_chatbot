@@ -13,7 +13,7 @@ import re
 import time
 from typing import List, Dict
 from PIL import Image
-from services.llm_client import generate_vision
+from services.llm_client import generate_vision, rotate_gemini_client, get_num_keys
 
 TAG_PROMPT = """You are reading a page from a college exam paper (PYQ) bundle.
 This bundle may mix multiple subjects together, with each subject's paper
@@ -52,8 +52,12 @@ def _get_retry_delay(e: Exception, default: int = 60) -> int:
 
 def tag_and_extract_page(image: Image.Image, known_subjects: List[str]) -> dict:
     prompt = TAG_PROMPT.format(known_subjects=", ".join(known_subjects) or "unknown")
-    # Retry up to 3 times on quota errors (429) with backoff
-    for attempt in range(3):
+    num_keys = get_num_keys()
+    
+    # Try up to 3 times per key, or cycle through keys until all are exhausted
+    max_attempts = max(3, num_keys * 2) 
+    
+    for attempt in range(max_attempts):
         try:
             raw = generate_vision([prompt, image])
             break
@@ -65,10 +69,17 @@ def tag_and_extract_page(image: Image.Image, known_subjects: List[str]) -> dict:
                 or "429" in str(e)
                 or "RESOURCE_EXHAUSTED" in str(e)
             )
-            if is_rate_limit and attempt < 2:
-                wait = _get_retry_delay(e, default=60 * (attempt + 1))
-                print(f"[ocr_tagger] Rate limited (attempt {attempt+1}), retrying in {wait}s...")
-                time.sleep(wait)
+            if is_rate_limit and attempt < max_attempts - 1:
+                if num_keys > 1:
+                    # We have multiple keys, rotate instantly and retry with a tiny delay
+                    rotate_gemini_client()
+                    print(f"[ocr_tagger] Key rotated, retrying instantly...")
+                    time.sleep(1)
+                else:
+                    # Only one key, must wait for the penalty to expire
+                    wait = _get_retry_delay(e, default=60 * (attempt + 1))
+                    print(f"[ocr_tagger] Rate limited (attempt {attempt+1}), retrying in {wait}s...")
+                    time.sleep(wait)
             else:
                 raise
     raw = raw.strip()
