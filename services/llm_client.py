@@ -17,6 +17,7 @@ from groq import Groq
 
 _gemini_clients = []
 _current_client_idx = 0
+_exhausted_keys = set()   # indices of keys that hit daily/permanent limits
 VISION_MODEL = "gemini-2.0-flash"
 
 
@@ -28,6 +29,7 @@ def _init_gemini_clients():
         _gemini_clients = [genai.Client(api_key=k) for k in keys]
         if not _gemini_clients:
             raise ValueError("No Gemini API keys found in environment.")
+        print(f"[llm_client] Loaded {len(_gemini_clients)} Gemini API key(s).")
 
 def get_current_gemini_client() -> genai.Client:
     _init_gemini_clients()
@@ -37,46 +39,100 @@ def rotate_gemini_client():
     global _current_client_idx
     _init_gemini_clients()
     _current_client_idx = (_current_client_idx + 1) % len(_gemini_clients)
-    print(f"[llm_client] Exhausted current key. Switched to Gemini API key #{_current_client_idx + 1} of {len(_gemini_clients)}")
+    print(f"[llm_client] Switched to Gemini API key #{_current_client_idx + 1} of {len(_gemini_clients)}")
 
 def get_num_keys() -> int:
     _init_gemini_clients()
     return len(_gemini_clients)
 
+
+def _parse_retry_delay(e: genai_errors.ClientError) -> float:
+    """Extract retryDelay seconds from the API error details, default 5s."""
+    try:
+        details = e.details if hasattr(e, "details") else []
+        if isinstance(details, dict):
+            details = details.get("error", {}).get("details", [])
+        for item in (details or []):
+            if isinstance(item, dict) and "retryDelay" in item:
+                delay_str = item["retryDelay"]  # e.g. "54s"
+                return float(delay_str.rstrip("s"))
+    except Exception:
+        pass
+    return 5.0
+
+
+def _is_daily_exhausted(e: genai_errors.ClientError) -> bool:
+    """Return True if this 429 is a daily quota violation (not just per-minute RPM)."""
+    try:
+        details = e.details if hasattr(e, "details") else []
+        if isinstance(details, dict):
+            details = details.get("error", {}).get("details", [])
+        for item in (details or []):
+            violations = item.get("violations", []) if isinstance(item, dict) else []
+            for v in violations:
+                if "PerDay" in v.get("quotaId", ""):
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 def generate_vision(contents: list, model: str = VISION_MODEL) -> str:
     """Send a multimodal prompt (text + image) to Gemini and return the text response.
-    
-    Automatically rotates through all configured API keys on 429 RESOURCE_EXHAUSTED.
-    Catches google.genai.errors.ClientError by type (not by message string) so this
-    works even when Streamlit Cloud redacts the error message.
+
+    On 429 RESOURCE_EXHAUSTED:
+    - Per-minute limit: waits the retry delay then tries the next key.
+    - Daily limit: marks the key as permanently exhausted and skips it.
+    Tries every available key before giving up.
     """
-    num_keys = get_num_keys()
+    _init_gemini_clients()
+    num_keys = len(_gemini_clients)
     last_exception = None
 
+    # Try each key exactly once, skipping permanently exhausted ones
     for attempt in range(num_keys):
-        client = get_current_gemini_client()
+        idx = (_current_client_idx + attempt) % num_keys
+        if idx in _exhausted_keys:
+            print(f"[llm_client] Skipping key #{idx + 1} (daily quota exhausted).")
+            continue
+
+        client = _gemini_clients[idx]
         try:
             response = client.models.generate_content(model=model, contents=contents)
+            # Success — update the active index so future calls start here
+            global _current_client_idx
+            _current_client_idx = idx
             return response.text
+
         except genai_errors.ClientError as e:
-            # Use e.code (not e.status_code) — that's the correct attribute in google-genai SDK
-            # Also check e.status as a secondary fallback
-            is_rate_limit = (e.code == 429 or e.status == "RESOURCE_EXHAUSTED")
-            if is_rate_limit:
-                print(
-                    f"[llm_client] Rate limit hit on key #{_current_client_idx + 1}. "
-                    f"Rotating to next key (attempt {attempt + 1}/{num_keys})..."
-                )
-                rotate_gemini_client()
-                last_exception = e
-                time.sleep(2)  # brief pause before retrying with new key
-            else:
+            is_rate_limit = (
+                getattr(e, "code", None) == 429
+                or getattr(e, "status", None) == "RESOURCE_EXHAUSTED"
+            )
+            if not is_rate_limit:
                 raise
-        except Exception as e:
-            # Non-ClientError (network, etc.) — re-raise immediately
+
+            last_exception = e
+            daily = _is_daily_exhausted(e)
+            delay = _parse_retry_delay(e)
+
+            if daily:
+                _exhausted_keys.add(idx)
+                print(
+                    f"[llm_client] Key #{idx + 1} hit daily quota limit — marking as exhausted. "
+                    f"({len(_exhausted_keys)}/{num_keys} keys dead)"
+                )
+            else:
+                print(
+                    f"[llm_client] Key #{idx + 1} hit per-minute rate limit. "
+                    f"Waiting {delay:.0f}s then trying next key..."
+                )
+                time.sleep(min(delay, 10))  # cap wait at 10s; next key may work immediately
+
+        except Exception:
             raise
 
-    print("[llm_client] All Gemini keys exhausted or rate limited.")
+    print("[llm_client] All Gemini keys are exhausted or rate-limited.")
     if last_exception:
         raise last_exception
     raise RuntimeError("Failed to generate vision content: all API keys are rate-limited.")
