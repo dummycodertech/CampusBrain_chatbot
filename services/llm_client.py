@@ -59,8 +59,10 @@ def generate_vision(contents: list, model: str = VISION_MODEL) -> str:
             response = client.models.generate_content(model=model, contents=contents)
             return response.text
         except genai_errors.ClientError as e:
-            # Check status_code directly — message may be redacted on Streamlit Cloud
-            if e.status_code == 429:
+            # Use e.code (not e.status_code) — that's the correct attribute in google-genai SDK
+            # Also check e.status as a secondary fallback
+            is_rate_limit = (e.code == 429 or e.status == "RESOURCE_EXHAUSTED")
+            if is_rate_limit:
                 print(
                     f"[llm_client] Rate limit hit on key #{_current_client_idx + 1}. "
                     f"Rotating to next key (attempt {attempt + 1}/{num_keys})..."
