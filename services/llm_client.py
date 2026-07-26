@@ -18,8 +18,10 @@ from groq import Groq
 _gemini_clients = []
 _current_client_idx = 0
 _exhausted_keys = set()   # indices of keys that hit daily/permanent limits
-VISION_MODEL = "gemini-2.5-flash"          # gemini-2.0-flash is blocked (limit=0 on free tier)
-VISION_MODEL_FALLBACK = "gemini-2.5-flash-lite"  # fallback when primary is exhausted
+# gemini-1.5-flash = "Gemini 3.5 Flash" in AI Studio dashboard — confirmed active on free tier
+# gemini-2.0-flash has limit=0 (blocked); gemini-2.5-flash shows 0 usage (may not be enabled)
+VISION_MODEL = "gemini-1.5-flash"
+VISION_MODEL_FALLBACK = "gemini-2.0-flash-lite"  # lighter variant, separate quota from blocked gemini-2.0-flash
 
 
 def _init_gemini_clients():
