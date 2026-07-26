@@ -41,11 +41,35 @@ def get_num_keys() -> int:
     _init_gemini_clients()
     return len(_gemini_clients)
 
+import time
+
 def generate_vision(contents: list, model: str = VISION_MODEL) -> str:
     """Send a multimodal prompt (text + image) to Gemini and return the text response."""
-    client = get_current_gemini_client()
-    response = client.models.generate_content(model=model, contents=contents)
-    return response.text
+    num_keys = get_num_keys()
+    attempts = 0
+    last_exception = None
+    
+    while attempts < num_keys:
+        client = get_current_gemini_client()
+        try:
+            response = client.models.generate_content(model=model, contents=contents)
+            return response.text
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "429" in error_msg or "quota" in error_msg or "exhausted" in error_msg:
+                print(f"[llm_client] Rate limit hit on current key. Rotating...")
+                rotate_gemini_client()
+                attempts += 1
+                last_exception = e
+                time.sleep(1)
+            else:
+                raise
+                
+    print("[llm_client] All Gemini keys exhausted or rate limited.")
+    if last_exception:
+        raise last_exception
+    else:
+        raise RuntimeError("Failed to generate vision content due to rate limits.")
 
 
 def get_groq_client() -> Groq:
