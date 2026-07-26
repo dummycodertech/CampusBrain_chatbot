@@ -1,7 +1,7 @@
 """Free-text chat input, routed through the keyword intent router."""
 import streamlit as st
 from router.intent_router import route_intent
-from generation.qa import answer_question
+from generation.qa import answer_question, knowledge_answer
 from generation.summary import summarize_paper
 from generation.quiz import generate_quiz
 
@@ -42,6 +42,8 @@ def render_chat_box(paper_text: str) -> None:
             content, msg_type = generate_quiz(paper_text), "quiz"
         elif intent == "summary":
             content, msg_type = summarize_paper(paper_text), "text"
+        elif intent == "knowledge":
+            content, msg_type = knowledge_answer(question), "text"
         else:
             content, msg_type = answer_question(paper_text, question), "text"
 

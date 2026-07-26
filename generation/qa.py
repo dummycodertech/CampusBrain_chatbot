@@ -1,31 +1,47 @@
 """
-Grounded Q&A over a single paper. Full-context stuffing, not vector retrieval:
-one paper's OCR'd text is small enough to hand the model whole, and this
-avoids the false negatives an embedding similarity miss could cause.
+Two-path Q&A:
 
-The model uses the paper as primary context but answers exam questions from
-its own academic knowledge (papers contain questions, not answers).
+1. knowledge_answer() — concept/theory questions ("What is X?", "Explain Y"):
+   Pure intrinsic knowledge answer, no paper text passed at all.
+   Comprehensive academic response, 300+ words, exam-ready structure.
+
+2. answer_question() — paper-grounded questions ("Which topics are in section A?"):
+   Uses the paper text as primary source.
 """
 from services.llm_client import generate_text
 
-QA_PROMPT = """You are an expert academic tutor helping a student prepare for their university exams.
-You have the student's exam paper text below — use it to understand what topics are covered.
+# ── Path 1: Pure knowledge answer ─────────────────────────────────────────────
+KNOWLEDGE_PROMPT = """You are an expert university-level academic tutor.
+A student is preparing for their exam and has asked you the following question.
+Answer it comprehensively from your own academic knowledge.
 
-=== HOW TO ANSWER ===
+Rules:
+- Write at least 300 words. Never give a short one-paragraph reply.
+- Structure your answer clearly:
+    • Start with a crisp 1-2 sentence definition.
+    • Expand with a detailed explanation (mechanisms, components, types, etc.)
+    • Give 1-2 concrete real-world examples.
+    • End with why it matters / exam significance.
+- Use bullet points, numbered lists, or subheadings where they aid clarity.
+- Write in a student-friendly but academically rigorous tone.
+- Do NOT reference "the paper" or "the exam document" — just answer the question.
 
-TYPE A — Student asks about paper structure (e.g. "how many questions?", "what are the marks?", "list all topics"):
-→ Answer directly from the paper text. Be concise.
+Student's question: {question}
 
-TYPE B — Student asks you to EXPLAIN or ANSWER an exam question (e.g. "explain ACID properties", "what is recursion?", "answer Q3"):
-→ The paper only contains QUESTIONS, not answers. Use your own deep academic knowledge.
-→ Write a thorough, exam-ready answer of 250-350 words minimum.
-→ Use structure: definition → explanation → example → significance.
-→ Use bullet points or numbered steps where helpful.
-→ Do NOT say "the paper doesn't contain the answer" — just answer the question directly.
+Answer:"""
 
-TYPE C — Student asks something general related to the subject (not in the paper at all):
-→ Answer fully from your academic knowledge, 200-300 words minimum.
-→ Relate it back to exam context where possible.
+
+def knowledge_answer(question: str) -> str:
+    """Answer a concept/theory question purely from intrinsic LLM knowledge."""
+    prompt = KNOWLEDGE_PROMPT.format(question=question)
+    return generate_text(prompt, temperature=0.5)
+
+
+# ── Path 2: Paper-grounded answer ─────────────────────────────────────────────
+PAPER_QA_PROMPT = """You are an academic assistant helping a student navigate their exam paper.
+The student wants to know something specific about the paper's content or structure.
+
+Use the exam paper text below to answer accurately. Cite question numbers or sections where relevant.
 
 === EXAM PAPER TEXT ===
 {paper_text}
@@ -33,9 +49,10 @@ TYPE C — Student asks something general related to the subject (not in the pap
 
 Student question: {question}
 
-Answer (be thorough, structured, and exam-ready):"""
+Answer:"""
 
 
 def answer_question(paper_text: str, question: str) -> str:
-    prompt = QA_PROMPT.format(paper_text=paper_text, question=question)
-    return generate_text(prompt, temperature=0.4)
+    """Answer a question grounded in the paper's text (structure, topics, marks, etc.)"""
+    prompt = PAPER_QA_PROMPT.format(paper_text=paper_text, question=question)
+    return generate_text(prompt, temperature=0.2)
