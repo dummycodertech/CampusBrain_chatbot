@@ -85,6 +85,7 @@ def generate_vision(contents: list, model: str = VISION_MODEL) -> str:
     - Daily limit: marks the key as permanently exhausted and skips it.
     Tries every available key before giving up.
     """
+    global _current_client_idx  # declared at top-level of function to avoid SyntaxError
     _init_gemini_clients()
     num_keys = len(_gemini_clients)
     last_exception = None
@@ -100,7 +101,6 @@ def generate_vision(contents: list, model: str = VISION_MODEL) -> str:
         try:
             response = client.models.generate_content(model=model, contents=contents)
             # Success — update the active index so future calls start here
-            global _current_client_idx
             _current_client_idx = idx
             return response.text
 
@@ -127,7 +127,7 @@ def generate_vision(contents: list, model: str = VISION_MODEL) -> str:
                     f"[llm_client] Key #{idx + 1} hit per-minute rate limit. "
                     f"Waiting {delay:.0f}s then trying next key..."
                 )
-                time.sleep(min(delay, 10))  # cap wait at 10s; next key may work immediately
+                time.sleep(min(delay, 10))
 
         except Exception:
             raise
