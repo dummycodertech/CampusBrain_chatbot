@@ -10,7 +10,9 @@ Thin wrappers around the two LLM providers this project uses:
   text) is squarely in its comfort zone.
 """
 import os
+import time
 from google import genai
+from google.genai import errors as genai_errors
 from groq import Groq
 
 _gemini_clients = []
@@ -41,35 +43,41 @@ def get_num_keys() -> int:
     _init_gemini_clients()
     return len(_gemini_clients)
 
-import time
-
 def generate_vision(contents: list, model: str = VISION_MODEL) -> str:
-    """Send a multimodal prompt (text + image) to Gemini and return the text response."""
-    num_keys = get_num_keys()
-    attempts = 0
-    last_exception = None
+    """Send a multimodal prompt (text + image) to Gemini and return the text response.
     
-    while attempts < num_keys:
+    Automatically rotates through all configured API keys on 429 RESOURCE_EXHAUSTED.
+    Catches google.genai.errors.ClientError by type (not by message string) so this
+    works even when Streamlit Cloud redacts the error message.
+    """
+    num_keys = get_num_keys()
+    last_exception = None
+
+    for attempt in range(num_keys):
         client = get_current_gemini_client()
         try:
             response = client.models.generate_content(model=model, contents=contents)
             return response.text
-        except Exception as e:
-            error_msg = str(e).lower()
-            if "429" in error_msg or "quota" in error_msg or "exhausted" in error_msg:
-                print(f"[llm_client] Rate limit hit on current key. Rotating...")
+        except genai_errors.ClientError as e:
+            # Check status_code directly — message may be redacted on Streamlit Cloud
+            if e.status_code == 429:
+                print(
+                    f"[llm_client] Rate limit hit on key #{_current_client_idx + 1}. "
+                    f"Rotating to next key (attempt {attempt + 1}/{num_keys})..."
+                )
                 rotate_gemini_client()
-                attempts += 1
                 last_exception = e
-                time.sleep(1)
+                time.sleep(2)  # brief pause before retrying with new key
             else:
                 raise
-                
+        except Exception as e:
+            # Non-ClientError (network, etc.) — re-raise immediately
+            raise
+
     print("[llm_client] All Gemini keys exhausted or rate limited.")
     if last_exception:
         raise last_exception
-    else:
-        raise RuntimeError("Failed to generate vision content due to rate limits.")
+    raise RuntimeError("Failed to generate vision content: all API keys are rate-limited.")
 
 
 def get_groq_client() -> Groq:
