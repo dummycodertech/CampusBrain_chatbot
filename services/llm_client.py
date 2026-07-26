@@ -18,7 +18,8 @@ from groq import Groq
 _gemini_clients = []
 _current_client_idx = 0
 _exhausted_keys = set()   # indices of keys that hit daily/permanent limits
-VISION_MODEL = "gemini-2.0-flash"
+VISION_MODEL = "gemini-2.5-flash"          # gemini-2.0-flash is blocked (limit=0 on free tier)
+VISION_MODEL_FALLBACK = "gemini-2.5-flash-lite"  # fallback when primary is exhausted
 
 
 def _init_gemini_clients():
@@ -90,8 +91,8 @@ def generate_vision(contents: list, model: str = VISION_MODEL) -> str:
 
     # Try primary model first, then fallback — each has its own separate quota pool
     models_to_try = [model]
-    if model != "gemini-1.5-flash":
-        models_to_try.append("gemini-1.5-flash")
+    if model != VISION_MODEL_FALLBACK:
+        models_to_try.append(VISION_MODEL_FALLBACK)
 
     last_exception = None
 
