@@ -46,9 +46,9 @@ def tag_and_extract_all(images: List[Image.Image], known_subjects: List[str]) ->
     results = []
     current_subject = None
     for i, image in enumerate(images, start=1):
-        # gemini-2.0-flash free tier: 15 RPM → safe at 1 request per 5s (12 RPM)
-        # Add a small delay even before page 1 to avoid collisions with prior requests
-        sleep_time = 2 if i == 1 else 5
+        # gemini-2.5-flash free tier: 5 RPM → need ≥12s between requests.
+        # Use 15s to be safe; first page gets 3s (unlikely to hit RPM on first call).
+        sleep_time = 3 if i == 1 else 15
         time.sleep(sleep_time)
 
         parsed = tag_and_extract_page(image, known_subjects)

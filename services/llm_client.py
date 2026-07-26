@@ -18,11 +18,10 @@ from groq import Groq
 _gemini_clients = []
 _current_client_idx = 0
 _exhausted_keys = set()   # indices of keys that hit daily/permanent limits
-# gemini-2.0-flash has limit=0 (blocked on free tier)
-# gemini-1.5-flash is 404 in new google.genai SDK (v1beta endpoint)
-# gemini-2.0-flash-lite = free tier, v1beta compatible, separate quota from blocked gemini-2.0-flash
-VISION_MODEL = "gemini-2.0-flash-lite"
-VISION_MODEL_FALLBACK = "gemini-2.5-flash"  # fallback if lite is also exhausted
+# Only gemini-2.5-flash is confirmed working on free tier (campus brain dashboard shows 1/20 RPD)
+# gemini-2.0-flash → limit=0 (blocked), gemini-2.0-flash-lite → also blocked, gemini-1.5-flash → 404
+VISION_MODEL = "gemini-2.5-flash"
+VISION_MODEL_FALLBACK = "gemini-2.5-flash-lite"  # lighter variant, separate quota pool
 
 
 def _init_gemini_clients():
