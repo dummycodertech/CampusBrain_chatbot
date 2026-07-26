@@ -118,33 +118,51 @@ def generate_vision(contents: list, model: str = VISION_MODEL) -> str:
                 _current_client_idx = idx
                 return response.text
 
-            except genai_errors.ClientError as e:
+            except genai_errors.APIError as e:
+                # Log the real code/status to stdout (visible in Streamlit Cloud logs)
+                code = getattr(e, "code", None)
+                status = getattr(e, "status", None)
+                print(f"[llm_client] Key #{idx + 1} / {current_model} → error code={code} status={status}")
+
                 is_rate_limit = (
-                    getattr(e, "code", None) == 429
-                    or getattr(e, "status", None) == "RESOURCE_EXHAUSTED"
+                    code == 429
+                    or str(code) == "429"
+                    or status == "RESOURCE_EXHAUSTED"
                 )
-                if not is_rate_limit:
+                is_server_error = code is not None and int(code) >= 500
+                is_not_found = code == 404
+
+                if is_not_found:
+                    # This model isn't available — stop trying it entirely
+                    print(f"[llm_client] Model {current_model} returned 404 — skipping all keys for this model.")
+                    break  # break inner loop, try next model in models_to_try
+
+                if is_rate_limit or is_server_error:
+                    last_exception = e
+                    daily = _is_daily_exhausted(e)
+                    delay = _parse_retry_delay(e)
+
+                    if daily:
+                        _exhausted_keys.add(idx)
+                        print(
+                            f"[llm_client] Key #{idx + 1} daily quota exhausted for {current_model}. "
+                            f"({len(_exhausted_keys)}/{num_keys} keys dead)"
+                        )
+                    else:
+                        print(
+                            f"[llm_client] Key #{idx + 1} per-minute limit on {current_model}. "
+                            f"Waiting {delay:.0f}s..."
+                        )
+                        time.sleep(min(delay, 10))
+                else:
+                    # Unexpected error — log and re-raise
+                    print(f"[llm_client] Unexpected error (code={code}), re-raising.")
                     raise
 
-                last_exception = e
-                daily = _is_daily_exhausted(e)
-                delay = _parse_retry_delay(e)
-
-                if daily:
-                    _exhausted_keys.add(idx)
-                    print(
-                        f"[llm_client] Key #{idx + 1} daily quota exhausted for {current_model}. "
-                        f"({len(_exhausted_keys)}/{num_keys} keys dead)"
-                    )
-                else:
-                    print(
-                        f"[llm_client] Key #{idx + 1} per-minute limit on {current_model}. "
-                        f"Waiting {delay:.0f}s..."
-                    )
-                    time.sleep(min(delay, 10))
-
-            except Exception:
+            except Exception as e:
+                print(f"[llm_client] Non-API exception: {type(e).__name__}: {e}")
                 raise
+
 
         print(f"[llm_client] All keys exhausted for {current_model}.")
 
