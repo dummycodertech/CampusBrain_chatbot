@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 from typing import List, Optional
 
-from ingestion.pdf_to_images import fetch_pdf, pdf_to_page_images
+from ingestion.pdf_to_images import fetch_pdf, pdf_to_pages
 from ingestion.ocr_tagger import tag_and_extract_all
 from ingestion.subject_reference import get_expected_subjects
 from storage.cache_store import CacheStore
@@ -35,8 +35,8 @@ def ingest_paper(
 
     with tempfile.TemporaryDirectory() as tmp:
         pdf_path = fetch_pdf(pdf_url, Path(tmp) / f"{paper_id}.pdf")
-        images = pdf_to_page_images(pdf_path)
-        tagged_pages = tag_and_extract_all(images, known_subjects)
+        pages = pdf_to_pages(pdf_path)
+        tagged_pages = tag_and_extract_all(pages, known_subjects)
 
         for page in tagged_pages:
             store.save_page(
@@ -61,8 +61,8 @@ def ingest_local_paper(
     if store.is_cached(paper_id):
         return  # already ingested
 
-    images = pdf_to_page_images(pdf_path)
-    tagged_pages = tag_and_extract_all(images, known_subjects)
+    pages = pdf_to_pages(pdf_path)
+    tagged_pages = tag_and_extract_all(pages, known_subjects)
 
     for page in tagged_pages:
         store.save_page(
