@@ -8,9 +8,18 @@ Ingests the paper on first view if not already cached, then shows the
 Summarize/Quiz buttons plus a free-text chat box.
 """
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv()  # works locally
 
+import os
 import streamlit as st
+
+# On Streamlit Cloud, secrets live in st.secrets (not os.environ).
+# Copy them into os.environ so every module that uses os.environ.get() works
+# identically in both local and cloud environments.
+for _k, _v in st.secrets.items():
+    if isinstance(_v, str):
+        os.environ.setdefault(_k, _v)
+
 from components.theme import inject_stitch_theme
 from ingestion.cache_writer import ingest_paper
 from retrieval.paper_lookup import get_paper_text

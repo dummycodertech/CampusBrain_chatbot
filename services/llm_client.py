@@ -83,59 +83,72 @@ def generate_vision(contents: list, model: str = VISION_MODEL) -> str:
     On 429 RESOURCE_EXHAUSTED:
     - Per-minute limit: waits the retry delay then tries the next key.
     - Daily limit: marks the key as permanently exhausted and skips it.
-    Tries every available key before giving up.
+    Tries every available key, then falls back to gemini-1.5-flash (separate quota).
     """
-    global _current_client_idx  # declared at top-level of function to avoid SyntaxError
+    global _current_client_idx
     _init_gemini_clients()
-    num_keys = len(_gemini_clients)
+
+    # Try primary model first, then fallback — each has its own separate quota pool
+    models_to_try = [model]
+    if model != "gemini-1.5-flash":
+        models_to_try.append("gemini-1.5-flash")
+
     last_exception = None
 
-    # Try each key exactly once, skipping permanently exhausted ones
-    for attempt in range(num_keys):
-        idx = (_current_client_idx + attempt) % num_keys
-        if idx in _exhausted_keys:
-            print(f"[llm_client] Skipping key #{idx + 1} (daily quota exhausted).")
-            continue
+    for current_model in models_to_try:
+        if current_model != model:
+            print(f"[llm_client] Falling back to {current_model} (separate quota pool)...")
+            # Reset exhausted keys for the new model — new quota pool
+            _exhausted_keys.clear()
 
-        client = _gemini_clients[idx]
-        try:
-            response = client.models.generate_content(model=model, contents=contents)
-            # Success — update the active index so future calls start here
-            _current_client_idx = idx
-            return response.text
+        num_keys = len(_gemini_clients)
 
-        except genai_errors.ClientError as e:
-            is_rate_limit = (
-                getattr(e, "code", None) == 429
-                or getattr(e, "status", None) == "RESOURCE_EXHAUSTED"
-            )
-            if not is_rate_limit:
+        for attempt in range(num_keys):
+            idx = (_current_client_idx + attempt) % num_keys
+            if idx in _exhausted_keys:
+                print(f"[llm_client] Skipping key #{idx + 1} (daily quota exhausted for {current_model}).")
+                continue
+
+            client = _gemini_clients[idx]
+            try:
+                response = client.models.generate_content(model=current_model, contents=contents)
+                _current_client_idx = idx
+                return response.text
+
+            except genai_errors.ClientError as e:
+                is_rate_limit = (
+                    getattr(e, "code", None) == 429
+                    or getattr(e, "status", None) == "RESOURCE_EXHAUSTED"
+                )
+                if not is_rate_limit:
+                    raise
+
+                last_exception = e
+                daily = _is_daily_exhausted(e)
+                delay = _parse_retry_delay(e)
+
+                if daily:
+                    _exhausted_keys.add(idx)
+                    print(
+                        f"[llm_client] Key #{idx + 1} daily quota exhausted for {current_model}. "
+                        f"({len(_exhausted_keys)}/{num_keys} keys dead)"
+                    )
+                else:
+                    print(
+                        f"[llm_client] Key #{idx + 1} per-minute limit on {current_model}. "
+                        f"Waiting {delay:.0f}s..."
+                    )
+                    time.sleep(min(delay, 10))
+
+            except Exception:
                 raise
 
-            last_exception = e
-            daily = _is_daily_exhausted(e)
-            delay = _parse_retry_delay(e)
+        print(f"[llm_client] All keys exhausted for {current_model}.")
 
-            if daily:
-                _exhausted_keys.add(idx)
-                print(
-                    f"[llm_client] Key #{idx + 1} hit daily quota limit — marking as exhausted. "
-                    f"({len(_exhausted_keys)}/{num_keys} keys dead)"
-                )
-            else:
-                print(
-                    f"[llm_client] Key #{idx + 1} hit per-minute rate limit. "
-                    f"Waiting {delay:.0f}s then trying next key..."
-                )
-                time.sleep(min(delay, 10))
-
-        except Exception:
-            raise
-
-    print("[llm_client] All Gemini keys are exhausted or rate-limited.")
+    print("[llm_client] All models and keys exhausted.")
     if last_exception:
         raise last_exception
-    raise RuntimeError("Failed to generate vision content: all API keys are rate-limited.")
+    raise RuntimeError("Failed to generate vision content: all API keys and models are rate-limited.")
 
 
 def get_groq_client() -> Groq:
