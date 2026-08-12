@@ -1,12 +1,18 @@
 """
-Two-path Q&A:
+Two-path Q&A routing for Campus Brain:
 
 1. knowledge_answer() — concept/theory questions ("What is X?", "Explain Y"):
-   Pure intrinsic knowledge answer, no paper text passed at all.
-   Comprehensive academic response, 300+ words, exam-ready structure.
+   Routes to the LLM's intrinsic knowledge with NO paper text attached.
+   Higher temperature (0.5) gives richer, more discursive academic prose.
+   Comprehensive 300+ word answers, exam-ready structure.
 
 2. answer_question() — paper-grounded questions ("Which topics are in section A?"):
-   Uses the paper text as primary source.
+   Injects the full extracted exam paper text into the prompt so the model
+   stays strictly grounded in what the paper actually says.
+   Low temperature (0.2) keeps it factual and deterministic.
+
+The router (router/intent_router.py) decides which path to call based on
+keyword matching on the student's free-text input.
 """
 from services.llm_client import generate_text
 
@@ -32,7 +38,12 @@ Answer:"""
 
 
 def knowledge_answer(question: str) -> str:
-    """Answer a concept/theory question purely from intrinsic LLM knowledge."""
+    """Answer a concept/theory question purely from intrinsic LLM knowledge.
+
+    Uses temperature=0.5 so the model produces richer explanatory prose
+    while still staying academically accurate (higher than 0.2 but not
+    creative enough to hallucinate facts).
+    """
     prompt = KNOWLEDGE_PROMPT.format(question=question)
     return generate_text(prompt, temperature=0.5)
 
@@ -53,6 +64,10 @@ Answer:"""
 
 
 def answer_question(paper_text: str, question: str) -> str:
-    """Answer a question grounded in the paper's text (structure, topics, marks, etc.)"""
+    """Answer a question grounded in the paper's text (structure, topics, marks, etc.).
+
+    Temperature is intentionally low (0.2) because the model should only
+    rephrase what the paper text says, not improvise extra detail.
+    """
     prompt = PAPER_QA_PROMPT.format(paper_text=paper_text, question=question)
     return generate_text(prompt, temperature=0.2)
