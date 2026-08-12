@@ -1,13 +1,22 @@
 """
-Thin wrappers around the two LLM providers this project uses:
+Thin wrappers around the two LLM providers used by Campus Brain:
 
-- Gemini (vision) for OCR + subject-boundary detection on scanned pages.
-  Chosen over Tesseract because it handles messy scans, multi-column
-  layouts, and math notation far better out of the box.
+- Gemini (gemini-2.5-flash) for OCR + subject-boundary detection on scanned
+  PDF pages.  Chosen over Tesseract because it handles messy scans,
+  multi-column layouts, and math notation far better out of the box.
   Uses the new google-genai SDK (google.generativeai is deprecated).
-- Groq (Llama 3.3 70B) for all text generation: Q&A, summary, quiz,
-  topic ranking. Fast and free-tier, and this task (answer from provided
-  text) is squarely in its comfort zone.
+  Multiple API keys are supported via GEMINI_API_KEYS (comma-separated);
+  the client rotates keys on per-minute rate limits and permanently skips
+  keys that have hit daily quotas.
+
+- Groq (llama-3.3-70b-versatile) for all text generation: Q&A, summaries,
+  quizzes, topic ranking.  Groq's inference is fast enough to feel
+  near-instant and the free tier is generous for this workload.
+
+Provider selection rationale
+-----------------------------
+  Vision  → Gemini 2.5 Flash  (multimodal, free tier, best OCR quality)
+  Text    → Groq Llama-3.3-70B (fast, free, strong instruction following)
 """
 import os
 import time
@@ -50,7 +59,13 @@ def get_num_keys() -> int:
 
 
 def _parse_retry_delay(e: genai_errors.ClientError) -> float:
-    """Extract retryDelay seconds from the API error details, default 5s."""
+    """Extract the retryDelay seconds advertised in the API error details.
+
+    The Gemini API embeds a 'retryDelay' field (e.g. '54s') in the error
+    details array when it returns 429 RESOURCE_EXHAUSTED.  We honour this
+    instead of using a fixed back-off so we wait exactly as long as the API
+    tells us to.  Falls back to 5 seconds if the field is absent.
+    """
     try:
         details = e.details if hasattr(e, "details") else []
         if isinstance(details, dict):
@@ -173,10 +188,18 @@ def generate_vision(contents: list, model: str = VISION_MODEL) -> str:
 
 
 def get_groq_client() -> Groq:
+    """Instantiate a fresh Groq client using GROQ_API_KEY from the environment."""
     return Groq(api_key=os.environ["GROQ_API_KEY"])
 
 
 def generate_text(prompt: str, model: str = "llama-3.3-70b-versatile", temperature: float = 0.2) -> str:
+    """Send a text prompt to Groq and return the completion string.
+
+    The default model (llama-3.3-70b-versatile) is the best balance of
+    quality and speed on Groq's free tier for this workload.
+    Temperature defaults to 0.2 for factual/retrieval tasks; callers that
+    want more expressive prose should pass a higher value (e.g. 0.5).
+    """
     client = get_groq_client()
     response = client.chat.completions.create(
         model=model,
