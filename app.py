@@ -1,11 +1,18 @@
 """
-Entrypoint. Reads paperId/pdfUrl/subject/year straight from the URL query
-params -- set by the website via iframe or hyperlink, see README for the
-contract. This means the app has zero runtime dependency on the website's
-backend: it only needs a fetchable PDF URL and metadata from the query string.
+Entrypoint for Campus Brain — the AI-powered PYQ study assistant.
 
-Ingests the paper on first view if not already cached, then shows the
-Summarize/Quiz buttons plus a free-text chat box.
+Design principles
+-----------------
+- URL-param first: the website passes paperId, pdfUrl, subject, year, branch,
+  semester directly in the query string.  This app never calls the website's
+  backend at runtime; all it needs is a publicly reachable PDF.
+- Local-upload fallback: when no query params are present the landing hero is
+  shown and the student can drag-drop any PDF directly into the app.
+- Ingestion is idempotent: calling ingest_paper() on an already-cached paper
+  is a no-op (SQLite cache check inside CacheStore), so page refreshes are
+  instant after the first load.
+- Session isolation: st.session_state.messages is flushed whenever the active
+  paper changes so chat history never leaks between papers.
 """
 from dotenv import load_dotenv
 load_dotenv()  # works locally
@@ -99,6 +106,8 @@ if not paper_id or not pdf_url:
     is_local_upload = True
 
 # ─── Session reset on new paper ───────────────────────────────
+# Guard: clear the chat history whenever the active paper changes so
+# responses from a previous paper don't bleed into the new one.
 if "messages" not in st.session_state or st.session_state.get("current_paper_id") != paper_id:
     st.session_state.messages = []
     st.session_state.current_paper_id = paper_id
