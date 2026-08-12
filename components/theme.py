@@ -1,7 +1,21 @@
 """
-Stitch-style premium dark UI — full CSS recreation.
-Black bg, aurora gradient blobs, dot-grid, huge centered text,
-frosted glass chat panel.
+Stitch-style premium dark UI for Campus Brain — full CSS recreation.
+
+Design notes
+------------
+- Background: three overlapping radial-gradient dot grids at 24 / 72 / 160 px
+  spacing create depth without any image asset.  The offset background-position
+  stagger prevents the dots from aligning into a single grid plane.
+- Aurora blobs: two fixed radial-gradient ellipses (purple/indigo) are blurred
+  with filter:blur(90px) and animated with a slow scale+translate keyframe.
+  Using two blobs at alternate-reverse timing produces natural-looking movement
+  without a JavaScript animation loop.
+- Chat messages use a fadeUp keyframe (translateY 8px -> 0) timed at 0.3s to
+  make each new response feel responsive and alive.
+- All selectors target Streamlit's internal data-testid attributes because
+  Streamlit's class names are unstable across versions (they're generated).
+- Fonts: Inter from Google Fonts — loaded via @import in the injected <style>
+  block.  No separate <link> tag needed.
 """
 import streamlit as st
 
