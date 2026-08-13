@@ -1,10 +1,13 @@
 """
 Two-path Q&A routing for Campus Brain:
 
-1. knowledge_answer() — concept/theory questions ("What is X?", "Explain Y"):
-   Routes to the LLM's intrinsic knowledge with NO paper text attached.
-   Higher temperature (0.5) gives richer, more discursive academic prose.
-   Comprehensive 300+ word answers, exam-ready structure.
+1. knowledge_answer() — concept/theory/math/code questions:
+   Calls Tavily web search first to pull live, accurate source material.
+   Injects the top results as [Source N] blocks into the LLM prompt so
+   answers are grounded in real web content instead of the model's (possibly
+   stale or hallucinated) intrinsic knowledge.
+   Falls back to pure-LLM intrinsic knowledge if Tavily is unavailable or
+   returns no results — so behaviour degrades gracefully, never breaks.
 
 2. answer_question() — paper-grounded questions ("Which topics are in section A?"):
    Injects the full extracted exam paper text into the prompt so the model
@@ -15,9 +18,36 @@ The router (router/intent_router.py) decides which path to call based on
 keyword matching on the student's free-text input.
 """
 from services.llm_client import generate_text
+from services.web_search import search_web
 
-# ── Path 1: Pure knowledge answer ─────────────────────────────────────────────
-KNOWLEDGE_PROMPT = """You are an expert university-level academic tutor.
+
+# ── Path 1a: Web-augmented knowledge answer ───────────────────────────────────
+_WEB_KNOWLEDGE_PROMPT = """You are an expert university-level academic tutor.
+A student is preparing for their exam and has asked: {question}
+
+Use the web sources below to give an accurate, well-structured answer.
+These sources are current and authoritative — prefer them over your training data.
+
+{sources_block}
+
+Rules:
+- Write at least 300 words. Never give a short one-paragraph reply.
+- Structure your answer clearly:
+    • Start with a crisp 1-2 sentence definition or direct answer.
+    • Expand with a detailed explanation (mechanisms, steps, types, etc.)
+    • Give 1-2 concrete real-world or worked examples where relevant.
+    • End with why it matters / exam significance.
+- Use bullet points, numbered lists, or subheadings where they aid clarity.
+- Cite sources inline as [Source 1], [Source 2] etc. where you use their content.
+- At the end, add a "**Sources:**" section listing the URLs you cited.
+- Write in a student-friendly but academically rigorous tone.
+- Do NOT reference "the paper" or "the exam document" — just answer the question.
+
+Answer:"""
+
+
+# ── Path 1b: Pure-LLM fallback (no web results) ──────────────────────────────
+_INTRINSIC_KNOWLEDGE_PROMPT = """You are an expert university-level academic tutor.
 A student is preparing for their exam and has asked you the following question.
 Answer it comprehensively from your own academic knowledge.
 
@@ -37,15 +67,47 @@ Student's question: {question}
 Answer:"""
 
 
-def knowledge_answer(question: str) -> str:
-    """Answer a concept/theory question purely from intrinsic LLM knowledge.
+def _build_sources_block(results: list) -> str:
+    """Format Tavily results into a numbered source block for the LLM prompt."""
+    lines = []
+    for i, r in enumerate(results, start=1):
+        # Truncate content to ~800 chars so we don't blow the context window
+        snippet = r["content"][:800].strip()
+        if len(r["content"]) > 800:
+            snippet += "…"
+        lines.append(
+            f"[Source {i}] {r['title']}\n"
+            f"URL: {r['url']}\n"
+            f"{snippet}"
+        )
+    return "\n\n".join(lines)
 
-    Uses temperature=0.5 so the model produces richer explanatory prose
-    while still staying academically accurate (higher than 0.2 but not
-    creative enough to hallucinate facts).
+
+def knowledge_answer(question: str) -> str:
+    """Answer a concept/theory/math/code question.
+
+    Flow:
+    1. Call Tavily web search for the student's question.
+    2. If results → build a grounded prompt with [Source N] blocks → Groq LLM.
+    3. If no results (key missing, quota, niche query) → fall back to pure-LLM
+       intrinsic knowledge prompt (original behaviour, zero regression).
+
+    Temperature 0.4 — richer prose than factual QA (0.2) but still accurate.
     """
-    prompt = KNOWLEDGE_PROMPT.format(question=question)
-    return generate_text(prompt, temperature=0.5)
+    results = search_web(question, max_results=3)
+
+    if results:
+        sources_block = _build_sources_block(results)
+        prompt = _WEB_KNOWLEDGE_PROMPT.format(
+            question=question,
+            sources_block=sources_block,
+        )
+        print(f"[qa] Web-augmented answer using {len(results)} Tavily source(s).")
+    else:
+        prompt = _INTRINSIC_KNOWLEDGE_PROMPT.format(question=question)
+        print("[qa] No Tavily results — using intrinsic LLM knowledge.")
+
+    return generate_text(prompt, temperature=0.4)
 
 
 # ── Path 2: Paper-grounded answer ─────────────────────────────────────────────
@@ -71,3 +133,4 @@ def answer_question(paper_text: str, question: str) -> str:
     """
     prompt = PAPER_QA_PROMPT.format(paper_text=paper_text, question=question)
     return generate_text(prompt, temperature=0.2)
+

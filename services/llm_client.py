@@ -187,6 +187,30 @@ def generate_vision(contents: list, model: str = VISION_MODEL) -> str:
     raise RuntimeError("Failed to generate vision content: all API keys and models are rate-limited.")
 
 
+def generate_vision_batch(prompt: str, images: list, model: str = VISION_MODEL) -> str:
+    """Send ONE multimodal request containing a prompt + multiple page images.
+
+    This is the key to quota efficiency: instead of 1 API call per scanned page,
+    callers can send all pages of a PDF in a single request.
+
+    contents = [prompt_text, image_1, image_2, ..., image_N]
+
+    All retry / key-rotation logic is inherited from generate_vision().
+    Gemini 2.5 Flash supports up to 3,600 image frames per request so even a
+    100-page PDF fits within one call.
+
+    Args:
+        prompt: Instruction text telling the model what to extract from the images.
+        images: List of PIL Image objects, in page order.
+        model:  Vision model to use (default: VISION_MODEL = gemini-2.5-flash).
+
+    Returns:
+        Raw text response from the model (caller must parse JSON etc.).
+    """
+    contents = [prompt] + images
+    return generate_vision(contents, model=model)
+
+
 def get_groq_client() -> Groq:
     """Instantiate a fresh Groq client using GROQ_API_KEY from the environment."""
     return Groq(api_key=os.environ["GROQ_API_KEY"])

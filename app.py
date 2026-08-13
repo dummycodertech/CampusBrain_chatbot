@@ -25,7 +25,19 @@ import streamlit as st
 # identically in both local and cloud environments.
 for _k, _v in st.secrets.items():
     if isinstance(_v, str):
-        os.environ.setdefault(_k, _v)
+        # Always overwrite so Cloud secrets take priority over any stale env.
+        os.environ[_k] = _v
+
+# Normalise key name: the rotation logic in llm_client.py reads GEMINI_API_KEYS
+# (plural).  Accept both spellings so either works.
+if "GEMINI_API_KEYS" not in os.environ and "GEMINI_API_KEY" in os.environ:
+    os.environ["GEMINI_API_KEYS"] = os.environ["GEMINI_API_KEY"]
+elif "GEMINI_API_KEY" not in os.environ and "GEMINI_API_KEYS" in os.environ:
+    os.environ["GEMINI_API_KEY"] = os.environ["GEMINI_API_KEYS"]
+
+# Log whether optional integrations are available (visible in Streamlit Cloud logs).
+_tavily_present = bool(os.environ.get("TAVILY_API_KEY", "").strip())
+print(f"[app] Tavily web search: {'enabled' if _tavily_present else 'disabled (no TAVILY_API_KEY)'}")
 
 from components.theme import inject_stitch_theme
 from ingestion.cache_writer import ingest_paper
@@ -132,29 +144,53 @@ st.markdown(
 )
 
 # ─── Ingest paper ─────────────────────────────────────────────
-with st.spinner("Scanning document..."):
-    if is_local_upload:
-        from storage.cache_store import CacheStore
-        store = CacheStore()
-        if not store.is_cached(paper_id):
-            import tempfile, os
-            from pathlib import Path
-            from ingestion.cache_writer import ingest_local_paper
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(file_bytes)
-                tmp_path = Path(tmp.name)
-            try:
-                ingest_local_paper(paper_id, tmp_path, year=year, known_subjects=[subject])
-            finally:
-                os.remove(tmp_path)
-    else:
-        ingest_paper(paper_id=paper_id, pdf_url=pdf_url, year=year, branch=branch, semester=semester)
+try:
+    with st.spinner("Scanning document..."):
+        if is_local_upload:
+            from storage.cache_store import CacheStore
+            store = CacheStore()
+            if not store.is_cached(paper_id):
+                import tempfile, os
+                from pathlib import Path
+                from ingestion.cache_writer import ingest_local_paper
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                    tmp.write(file_bytes)
+                    tmp_path = Path(tmp.name)
+                try:
+                    ingest_local_paper(paper_id, tmp_path, year=year, known_subjects=[subject])
+                finally:
+                    os.remove(tmp_path)
+        else:
+            ingest_paper(paper_id=paper_id, pdf_url=pdf_url, year=year, branch=branch, semester=semester)
 
-    paper_text = get_paper_text(paper_id)
+        paper_text = get_paper_text(paper_id)
+
+except Exception as _ingest_err:
+    _msg = str(_ingest_err)
+    if "429" in _msg or "RESOURCE_EXHAUSTED" in _msg or "rate" in _msg.lower():
+        st.error(
+            "⚠️ **Gemini API rate limit reached.**\n\n"
+            "The free tier allows only **20 OCR requests per day**. "
+            "All available API keys are temporarily exhausted.\n\n"
+            "**What you can do:**\n"
+            "- Wait a few minutes and try again\n"
+            "- Try a PDF that has selectable text (not a scanned image) — those use zero API quota\n"
+            "- Add another Gemini API key in Streamlit Cloud → Settings → Secrets"
+        )
+    elif "API key" in _msg or "api_key" in _msg.lower() or "INVALID" in _msg:
+        st.error(
+            "🔑 **Gemini API key error.**\n\n"
+            "The API key is missing or invalid. Check your Streamlit Cloud secrets and make sure "
+            "`GEMINI_API_KEY` (or `GEMINI_API_KEYS`) is set correctly."
+        )
+    else:
+        st.error(f"❌ Failed to process this paper: {_msg}")
+    st.stop()
 
 if not paper_text:
     st.error("Could not extract text from this paper.")
     st.stop()
+
 
 # ─── Actions + Chat ───────────────────────────────────────────
 render_action_buttons(paper_text)
