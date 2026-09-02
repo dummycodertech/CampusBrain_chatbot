@@ -9,14 +9,14 @@ Thin wrappers around the two LLM providers used by Campus Brain:
   the client rotates keys on per-minute rate limits and permanently skips
   keys that have hit daily quotas.
 
-- Groq (llama-3.3-70b-versatile) for all text generation: Q&A, summaries,
-  quizzes, topic ranking.  Groq's inference is fast enough to feel
-  near-instant and the free tier is generous for this workload.
+- Groq (openai/gpt-oss-120b) for all text generation: Q&A, summaries,
+  quizzes, topic ranking.  This is Groq's current recommended replacement
+  for the decommissioned llama-3.3-70b-versatile model (retired Aug 2026).
 
 Provider selection rationale
 -----------------------------
   Vision  → Gemini 2.5 Flash  (multimodal, free tier, best OCR quality)
-  Text    → Groq Llama-3.3-70B (fast, free, strong instruction following)
+  Text    → Groq openai/gpt-oss-120b (fast, replaces retired llama-3.3-70b)
 """
 import os
 import time
@@ -216,11 +216,11 @@ def get_groq_client() -> Groq:
     return Groq(api_key=os.environ["GROQ_API_KEY"])
 
 
-def generate_text(prompt: str, model: str = "llama-3.3-70b-versatile", temperature: float = 0.2) -> str:
+def generate_text(prompt: str, model: str = "openai/gpt-oss-120b", temperature: float = 0.2) -> str:
     """Send a text prompt to Groq and return the completion string.
 
-    The default model (llama-3.3-70b-versatile) is the best balance of
-    quality and speed on Groq's free tier for this workload.
+    Default model is openai/gpt-oss-120b -- Groq's recommended replacement
+    for the decommissioned llama-3.3-70b-versatile (retired Aug 2026).
     Temperature defaults to 0.2 for factual/retrieval tasks; callers that
     want more expressive prose should pass a higher value (e.g. 0.5).
     """
