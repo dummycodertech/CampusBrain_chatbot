@@ -281,8 +281,9 @@ footer,
     opacity: 0.5;
 }
 
-/* ─── Buttons ────────────────────────────────────────────── */
-.stButton > button {
+/* ─── Buttons + Download Button ──────────────────── */
+.stButton > button,
+[data-testid="stDownloadButton"] > button {
     font-family: 'Inter', sans-serif !important;
     font-weight: 500 !important;
     font-size: 0.85rem !important;
@@ -293,13 +294,20 @@ footer,
     padding: 0.45rem 1.1rem !important;
     transition: all 0.2s ease !important;
     letter-spacing: 0.1px;
+    width: 100%;
 }
 
-.stButton > button:hover {
+.stButton > button:hover,
+[data-testid="stDownloadButton"] > button:hover {
     background: rgba(124, 58, 237, 0.15) !important;
     border-color: rgba(124, 58, 237, 0.4) !important;
     color: #c4b5fd !important;
     transform: none !important;
+}
+
+.stButton > button:disabled {
+    opacity: 0.4 !important;
+    cursor: not-allowed !important;
 }
 
 /* ─── Chat messages ──────────────────────────────────────── */

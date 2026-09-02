@@ -216,7 +216,12 @@ def get_groq_client() -> Groq:
     return Groq(api_key=os.environ["GROQ_API_KEY"])
 
 
-def generate_text(prompt: str, model: str = "openai/gpt-oss-120b", temperature: float = 0.2) -> str:
+def generate_text(
+    prompt: str,
+    model: str = "openai/gpt-oss-120b",
+    temperature: float = 0.2,
+    max_tokens: int = 2048,
+) -> str:
     """Send a text prompt to Groq and return the completion string.
 
     Default model is openai/gpt-oss-120b -- Groq's recommended replacement
@@ -229,5 +234,8 @@ def generate_text(prompt: str, model: str = "openai/gpt-oss-120b", temperature: 
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=temperature,
+        max_tokens=max_tokens,
     )
-    return response.choices[0].message.content
+    content = response.choices[0].message.content
+    # Groq can return None for content when finish_reason is 'stop' with no output
+    return content if content is not None else ""
