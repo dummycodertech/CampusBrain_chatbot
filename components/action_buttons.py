@@ -190,16 +190,23 @@ def render_action_buttons(paper_text: str) -> None:
             st.session_state.show_heatmap = False
 
     with col6:
-        export_bytes = _build_export_text().encode("utf-8")
-        fname = f"campus_brain_chat_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.txt"
-        st.download_button(
-            label="💾 Export Chat",
-            data=export_bytes,
-            file_name=fname,
-            mime="text/plain",
-            use_container_width=True,
-            help="Download the full conversation as a .txt file",
-        )
+        if st.session_state.get("messages"):
+            export_bytes = io.BytesIO(_build_export_text().encode("utf-8"))
+            st.download_button(
+                label="💾 Export Chat",
+                data=export_bytes,
+                file_name=f"campus_brain_chat_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                mime="text/plain",
+                use_container_width=True,
+                help="Download the full conversation as a .txt file",
+            )
+        else:
+            st.button(
+                "💾 Export Chat",
+                disabled=True,
+                use_container_width=True,
+                help="Start a conversation first to enable export.",
+            )
 
     # ── Inline panels (toggled by buttons above) ──────────────────────────────
     if st.session_state.get("show_heatmap"):
