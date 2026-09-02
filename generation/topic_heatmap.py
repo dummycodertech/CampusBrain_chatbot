@@ -64,13 +64,36 @@ def generate_topic_heatmap(paper_text: str) -> dict:
 
     raw = generate_text(HEATMAP_PROMPT.format(paper_text=truncated), temperature=0.1)
 
-    # Strip markdown fences if present
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        cleaned = "\n".join(
-            line for i, line in enumerate(lines)
-            if not (i == 0 and line.startswith("```")) and line.strip() != "```"
+    if not raw or not raw.strip():
+        raise ValueError("Model returned an empty response. Try again or use a longer paper.")
+
+    return _extract_json(raw)
+
+
+def _extract_json(raw: str) -> dict:
+    """Robustly extract a JSON object from a model response.
+
+    Handles:
+    - Bare JSON
+    - ```json ... ``` fences
+    - ``` ... ``` fences (no language tag)
+    - Extra leading/trailing text before/after the JSON object
+    """
+    import re
+    text = raw.strip()
+
+    # 1. Strip markdown code fences
+    if text.startswith("```"):
+        # Remove opening fence line (```json or ```)
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        # Remove closing fence
+        text = re.sub(r"```\s*$", "", text).strip()
+
+    # 2. Find the first { ... } block in case model added preamble text
+    match = re.search(r"\{[\s\S]+\}", text)
+    if not match:
+        raise ValueError(
+            f"No JSON object found in model response. Raw response was:\n{raw[:300]}"
         )
 
-    return json.loads(cleaned.strip())
+    return json.loads(match.group(0))
