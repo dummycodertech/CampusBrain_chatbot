@@ -190,27 +190,8 @@ def render_action_buttons(paper_text: str) -> None:
             st.session_state.show_heatmap = False
 
     with col6:
-        # Always-active download button — styled differently (green) to signal download
-        export_text = _build_export_text()
-        export_bytes = export_text.encode("utf-8")
+        export_bytes = _build_export_text().encode("utf-8")
         fname = f"campus_brain_chat_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.txt"
-        st.markdown(
-            """
-            <style>
-            [data-testid="stDownloadButton"] > button {
-                background: rgba(16, 185, 129, 0.15) !important;
-                border: 1px solid rgba(16, 185, 129, 0.4) !important;
-                color: #6ee7b7 !important;
-            }
-            [data-testid="stDownloadButton"] > button:hover {
-                background: rgba(16, 185, 129, 0.3) !important;
-                border-color: #10b981 !important;
-                color: #a7f3d0 !important;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
         st.download_button(
             label="💾 Export Chat",
             data=export_bytes,
