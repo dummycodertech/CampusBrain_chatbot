@@ -1,43 +1,43 @@
 """
 Topic-frequency heatmap generator for Campus Brain.
 
-Design choices for free-tier efficiency:
-- Single LLM call with one retry on empty response.
-- Paper text is truncated to 5000 chars to keep token usage minimal.
-- Returns structured JSON; rendering uses st.bar_chart (pure frontend, zero cost).
+Uses pipe-delimited table format instead of JSON — avoids all JSON parsing
+issues. The model handles table formats very reliably.
+
+Free-tier optimized:
+- Single call, one retry on empty.
+- Paper truncated to 5000 chars (~1250 tokens).
 """
-import json
-import re
 from services.llm_client import generate_text
 
 _MAX_CHARS = 5000
 
-# Simplified prompt — no double-brace JSON example (confuses some models).
-# Asks for numbered list first, then JSON conversion.
-HEATMAP_PROMPT = """You are an expert exam analyser. Read the exam paper below and identify the main topics tested.
+HEATMAP_PROMPT = """You are an exam paper analyser.
+
+Read the exam paper below and identify its main topics.
 
 EXAM PAPER:
 {paper_text}
 
-Instructions:
-- List between 5 and 10 distinct topics found in this paper.
-- For each topic, estimate how many questions relate to it (integer).
-- Estimate total marks if visible, else use 0.
-- Write a brief description (under 10 words).
+Output a table with EXACTLY this format — one topic per line, pipe-separated:
+TOPIC | QUESTIONS | MARKS | DESCRIPTION
 
-Respond ONLY with a valid JSON object in this exact format (no other text):
-{json_example}"""
+Rules:
+- TOPIC: name of the topic (short, clear)
+- QUESTIONS: integer count of questions about this topic
+- MARKS: integer total marks allocated (0 if not shown)
+- DESCRIPTION: under 10 words describing what the topic covers
+- List 5 to 10 topics, sorted by QUESTIONS descending
+- Output ONLY the data rows, no headers, no extra text
 
-_JSON_EXAMPLE = """{
-  "topics": [
-    {"topic": "Topic Name", "questions": 3, "marks": 10, "description": "Brief description here"},
-    {"topic": "Another Topic", "questions": 2, "marks": 8, "description": "Brief description here"}
-  ]
-}"""
+Example output:
+Digital Logic | 3 | 15 | Boolean algebra, gates and Karnaugh maps
+Microprocessors | 2 | 10 | 8085 architecture and instruction set
+Memory Systems | 1 | 5 | RAM, ROM types and organisation"""
 
 
 def generate_topic_heatmap(paper_text: str) -> dict:
-    """Extract topic frequency data from a paper — single LLM call with one retry.
+    """Extract topics from a paper as a pipe-delimited table — very reliable.
 
     Returns:
         {"topics": [{"topic": str, "questions": int, "marks": int, "description": str}, ...]}
@@ -46,39 +46,57 @@ def generate_topic_heatmap(paper_text: str) -> dict:
     if len(paper_text) > _MAX_CHARS:
         truncated += "\n[... paper continues ...]"
 
-    prompt = HEATMAP_PROMPT.format(paper_text=truncated, json_example=_JSON_EXAMPLE)
+    prompt = HEATMAP_PROMPT.format(paper_text=truncated)
 
-    # First attempt
-    raw = generate_text(prompt, temperature=0.3, max_tokens=1500)
+    raw = generate_text(prompt, temperature=0.3, max_tokens=1000)
 
-    # One retry if empty
+    # Retry once if empty
     if not raw or not raw.strip():
-        print("[topic_heatmap] Empty response on first try — retrying...")
-        raw = generate_text(prompt, temperature=0.5, max_tokens=1500)
+        print("[topic_heatmap] Empty response — retrying...")
+        raw = generate_text(prompt, temperature=0.5, max_tokens=1000)
 
     if not raw or not raw.strip():
         raise ValueError(
-            "The model returned an empty response twice. "
-            "This may be a temporary Groq rate-limit issue — please try again in a moment."
+            "The model returned no output. This may be a temporary rate-limit. Please try again."
         )
 
-    return _extract_json(raw)
+    return _parse_table(raw)
 
 
-def _extract_json(raw: str) -> dict:
-    """Robustly extract the first JSON object from a model response."""
-    text = raw.strip()
+def _parse_table(raw: str) -> dict:
+    """Parse pipe-delimited table rows into a dict.
 
-    # Strip markdown code fences
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-        text = re.sub(r"```\s*$", "", text).strip()
+    Skips any header line or malformed row gracefully.
+    """
+    topics = []
+    for line in raw.strip().splitlines():
+        line = line.strip()
+        # Skip empty lines, header-like lines, or separator lines
+        if not line or "|" not in line:
+            continue
+        # Skip if it looks like a header (TOPIC | QUESTIONS ...)
+        if "TOPIC" in line.upper() and "QUESTIONS" in line.upper():
+            continue
 
-    # Find the first {...} block (in case model adds preamble)
-    match = re.search(r"\{[\s\S]+\}", text)
-    if not match:
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 4:
+            continue
+
+        try:
+            topics.append({
+                "topic": parts[0],
+                "questions": int("".join(c for c in parts[1] if c.isdigit()) or "1"),
+                "marks": int("".join(c for c in parts[2] if c.isdigit()) or "0"),
+                "description": parts[3],
+            })
+        except (ValueError, IndexError):
+            # Skip malformed rows silently
+            continue
+
+    if not topics:
         raise ValueError(
-            f"No JSON object found in model response.\nRaw (first 400 chars):\n{raw[:400]}"
+            "Could not extract topics from the model response. "
+            f"Raw output was:\n{raw[:400]}"
         )
 
-    return json.loads(match.group(0))
+    return {"topics": topics}
