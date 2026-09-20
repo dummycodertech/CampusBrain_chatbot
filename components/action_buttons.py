@@ -23,7 +23,12 @@ def _render_heatmap(paper_text: str) -> None:
     """Render the topic frequency bar chart + detail table."""
     with st.spinner("Analysing topic distribution..."):
         try:
-            data = generate_topic_heatmap(paper_text)
+            # Pass any cached summary so we don't need an extra API call
+            cached_summary = st.session_state.get("cached_summary", "")
+            data = generate_topic_heatmap(paper_text, cached_summary=cached_summary)
+            # Cache the summary for future heatmap renders
+            if data.get("summary_text") and not cached_summary:
+                st.session_state["cached_summary"] = data["summary_text"]
         except Exception as e:
             st.error(f"Could not generate heatmap: {e}")
             return
@@ -149,6 +154,8 @@ def render_action_buttons(paper_text: str) -> None:
         if st.button("📝 Summarize", use_container_width=True):
             with st.spinner("Summarizing..."):
                 summary = summarize_paper(paper_text)
+            # Cache for heatmap reuse
+            st.session_state["cached_summary"] = summary
             st.session_state.messages.append(
                 {"role": "assistant", "content": summary, "type": "text"}
             )

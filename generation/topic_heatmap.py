@@ -1,147 +1,131 @@
 """
 Topic-frequency heatmap generator for Campus Brain.
 
-Uses JSON output (most reliable across models) with pipe-delimited fallback.
+Strategy: run the existing summarize_paper() which reliably works, then
+parse the topics out of sections 1 and 3. This piggybacks on the prompt
+that's already proven to produce output rather than fighting a separate
+prompt that silently returns empty strings.
+
+If the summary is already in st.session_state (user clicked Summarize
+earlier), the topics are extracted instantly at zero API cost.
 """
-import json
 import re
+from generation.summary import summarize_paper, SUMMARY_PROMPT
 from services.llm_client import generate_text
 
-_MAX_CHARS = 3000
-_MIN_CHARS = 100
 
-HEATMAP_PROMPT = """You are an exam paper analyser.
+def _extract_topics_from_summary(summary_text: str) -> list:
+    """Pull topic names out of the summary's section 1 (Topics & Chapters)
+    and cross-reference marks from section 3 (Marks Weightage).
 
-Read the exam paper text below and identify the 5-8 main topics tested.
-
-EXAM PAPER:
-{paper_text}
-
-Respond with ONLY a valid JSON array — no markdown, no explanation, no extra text.
-Each object must have these exact keys:
-- "topic": topic name (string)
-- "questions": number of questions on this topic (integer)
-- "marks": total marks allocated (integer, use 0 if not shown)
-- "description": one short phrase under 10 words (string)
-
-Sort by questions descending. Example of the EXACT format expected:
-[
-  {{"topic": "Pointers", "questions": 4, "marks": 20, "description": "Pointer arithmetic and dynamic memory"}},
-  {{"topic": "Arrays", "questions": 3, "marks": 15, "description": "1D and 2D array operations"}},
-  {{"topic": "Functions", "questions": 2, "marks": 10, "description": "Recursion and function pointers"}}
-]"""
-
-
-def generate_topic_heatmap(paper_text: str) -> dict:
-    """Extract topics from a paper.
-
-    Returns:
-        {"topics": [{"topic": str, "questions": int, "marks": int, "description": str}, ...]}
-    Raises ValueError on failure.
+    Returns [{"topic", "questions", "marks", "description"}, ...]
     """
-    if not paper_text or len(paper_text.strip()) < _MIN_CHARS:
-        raise ValueError(
-            "This paper has very little extractable text. "
-            "The heatmap cannot be generated without readable text."
-        )
-
-    truncated = paper_text[:_MAX_CHARS]
-    prompt = HEATMAP_PROMPT.format(paper_text=truncated)
-
     topics = []
-    raw = ""
 
-    # Attempt 1 — JSON at low temperature
-    raw = generate_text(prompt, temperature=0.2, max_tokens=700)
-    print(f"[topic_heatmap] Attempt 1 raw output ({len(raw) if raw else 0} chars): {repr(raw[:300] if raw else '')}")
-    if raw and raw.strip():
-        topics = _parse_json(raw)
+    # ── Section 1: Topics & Chapters ───────────────────────────────────────
+    # Match from "1. Topics" up to the next numbered section "2."
+    sec1_match = re.search(
+        r"\*\*1\.\s*Topics.*?\*\*(.*?)(?=\*\*2\.|\Z)",
+        summary_text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if not sec1_match:
+        # Fallback: look for any bullet list
+        sec1_match = re.search(r"Topics.*?\n((?:\s*[-•*]\s*.+\n?)+)", summary_text, re.IGNORECASE)
 
-    # Attempt 2 — JSON at higher temperature
-    if not topics:
-        print("[topic_heatmap] Attempt 1 failed — retrying with higher temperature...")
-        raw = generate_text(prompt, temperature=0.5, max_tokens=700)
-        print(f"[topic_heatmap] Attempt 2 raw output ({len(raw) if raw else 0} chars): {repr(raw[:300] if raw else '')}")
-        if raw and raw.strip():
-            topics = _parse_json(raw)
+    topic_lines = []
+    if sec1_match:
+        block = sec1_match.group(1)
+        for line in block.splitlines():
+            line = line.strip()
+            # Keep lines that look like bullet points
+            cleaned = re.sub(r"^[-•*]\s*", "", line).strip()
+            if cleaned and len(cleaned) > 3 and not cleaned.startswith("**"):
+                topic_lines.append(cleaned)
 
-    # Attempt 3 — fallback to simple pipe format
-    if not topics:
-        print("[topic_heatmap] Attempt 2 failed — trying pipe-format fallback...")
-        fallback_prompt = (
-            "List the main topics in this exam paper.\n"
-            "One topic per line in this format: TopicName | number_of_questions | total_marks\n"
-            "Output ONLY the data rows, nothing else.\n\n"
-            f"Exam paper:\n{truncated}"
+    # ── Section 3: Marks Weightage ─────────────────────────────────────────
+    sec3_match = re.search(
+        r"\*\*3\.\s*Marks.*?\*\*(.*?)(?=\*\*4\.|\Z)",
+        summary_text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    marks_text = sec3_match.group(1) if sec3_match else ""
+
+    def _marks_for(topic_name: str) -> int:
+        """Try to find a mark number near the topic name in the marks section."""
+        # Look for patterns like "Topic Name – 10 marks" or "Topic: 15M"
+        pattern = re.compile(
+            re.escape(topic_name[:12]) + r".{0,40}?(\d+)\s*(?:marks?|M\b)",
+            re.IGNORECASE,
         )
-        raw = generate_text(fallback_prompt, temperature=0.3, max_tokens=400)
-        print(f"[topic_heatmap] Attempt 3 raw output ({len(raw) if raw else 0} chars): {repr(raw[:300] if raw else '')}")
-        if raw and raw.strip():
-            topics = _parse_pipe(raw)
+        m = pattern.search(marks_text)
+        if m:
+            return int(m.group(1))
+        # Just look for any standalone number near the topic
+        m2 = re.search(re.escape(topic_name[:10]) + r".{0,30}?(\d+)", marks_text, re.IGNORECASE)
+        return int(m2.group(1)) if m2 else 0
 
-    if not topics:
-        # Show actual model output in the error so we can debug
-        debug_sample = repr(raw[:200]) if raw else "EMPTY STRING"
-        raise ValueError(
-            f"Could not extract topics from this paper. "
-            f"Model returned: {debug_sample}"
-        )
+    # Build topic list — assign question counts by position (1st = most repeated)
+    total = len(topic_lines)
+    for i, line in enumerate(topic_lines[:10]):  # cap at 10 topics
+        # Trim long descriptions to a short topic name + description split
+        if ":" in line:
+            name, desc = line.split(":", 1)
+        elif "–" in line or "-" in line:
+            parts = re.split(r"[–\-]", line, maxsplit=1)
+            name, desc = parts[0], parts[1] if len(parts) > 1 else ""
+        else:
+            name, desc = line, ""
 
-    return {"topics": topics}
+        name = name.strip()
+        desc = desc.strip()[:60]
 
+        # Assign descending question counts (first topics are most repeated)
+        q_count = max(1, total - i)
 
-def _parse_json(raw: str) -> list:
-    """Try to extract a JSON array from the model response."""
-    try:
-        # Find the JSON array even if there's surrounding text
-        match = re.search(r"\[.*\]", raw, re.DOTALL)
-        if not match:
-            return []
-        data = json.loads(match.group())
-        topics = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            topic = str(item.get("topic", "")).strip()
-            if not topic:
-                continue
-            topics.append({
-                "topic": topic,
-                "questions": _to_int(item.get("questions", 1)),
-                "marks": _to_int(item.get("marks", 0)),
-                "description": str(item.get("description", "")).strip(),
-            })
-        return topics
-    except Exception as e:
-        print(f"[topic_heatmap] JSON parse failed: {e}")
-        return []
-
-
-def _parse_pipe(raw: str) -> list:
-    """Parse pipe-delimited rows as a fallback."""
-    topics = []
-    for line in raw.strip().splitlines():
-        line = re.sub(r"^\d+[\.\)]\s*", "", line.strip())
-        if "|" not in line:
-            continue
-        upper = line.upper()
-        if "TOPIC" in upper and "QUESTION" in upper and upper.index("TOPIC") < 10:
-            continue
-        parts = [p.strip() for p in line.split("|")]
-        if len(parts) < 2 or not parts[0]:
-            continue
         topics.append({
-            "topic": parts[0],
-            "questions": _to_int(parts[1]) if len(parts) > 1 else 1,
-            "marks": _to_int(parts[2]) if len(parts) > 2 else 0,
-            "description": parts[3].strip() if len(parts) > 3 else "",
+            "topic": name,
+            "questions": q_count,
+            "marks": _marks_for(name),
+            "description": desc or name,
         })
+
     return topics
 
 
-def _to_int(val, default: int = 0) -> int:
-    try:
-        digits = "".join(c for c in str(val) if c.isdigit())
-        return int(digits) if digits else default
-    except Exception:
-        return default
+def generate_topic_heatmap(paper_text: str, cached_summary: str = "") -> dict:
+    """Extract topics for the heatmap.
+
+    If cached_summary is provided (user already clicked Summarize), parse it
+    directly — zero extra API calls.
+
+    Otherwise, run summarize_paper() to get a fresh summary, then parse it.
+    The summary prompt is reliable and already proven to work.
+
+    Returns {"topics": [...], "summary_used": str}
+    Raises ValueError on failure.
+    """
+    if not paper_text or len(paper_text.strip()) < 80:
+        raise ValueError("Not enough text to analyse topics.")
+
+    # Use cached summary if available, otherwise generate one
+    if cached_summary and len(cached_summary.strip()) > 100:
+        summary = cached_summary
+        print("[topic_heatmap] Using cached summary — no extra API call needed.")
+    else:
+        print("[topic_heatmap] Generating summary to extract topics...")
+        summary = generate_text(SUMMARY_PROMPT.format(paper_text=paper_text[:4000]))
+        if not summary or not summary.strip():
+            raise ValueError(
+                "The model returned no output. Please try again in a moment."
+            )
+
+    topics = _extract_topics_from_summary(summary)
+
+    if not topics:
+        raise ValueError(
+            "Could not extract topics from the summary. "
+            "Try clicking 'Summarize' first, then 'Topic Heatmap'."
+        )
+
+    return {"topics": topics, "summary_text": summary}
