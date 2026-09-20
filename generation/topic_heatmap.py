@@ -1,131 +1,90 @@
 """
 Topic-frequency heatmap generator for Campus Brain.
 
-Strategy: run the existing summarize_paper() which reliably works, then
-parse the topics out of sections 1 and 3. This piggybacks on the prompt
-that's already proven to produce output rather than fighting a separate
-prompt that silently returns empty strings.
-
-If the summary is already in st.session_state (user clicked Summarize
-earlier), the topics are extracted instantly at zero API cost.
+Piggybacks on summarize_paper() which reliably works, then parses the
+structured TOPICS_START/TOPICS_END block the summary prompt emits.
+Parsing is trivial — no regex, no JSON, just splitlines + split('|').
 """
-import re
 from generation.summary import summarize_paper, SUMMARY_PROMPT
 from services.llm_client import generate_text
 
 
-def _extract_topics_from_summary(summary_text: str) -> list:
-    """Pull topic names out of the summary's section 1 (Topics & Chapters)
-    and cross-reference marks from section 3 (Marks Weightage).
-
-    Returns [{"topic", "questions", "marks", "description"}, ...]
-    """
+def _parse_topics_block(summary_text: str) -> list:
+    """Extract topics from the ---TOPICS_START--- block in the summary."""
     topics = []
 
-    # ── Section 1: Topics & Chapters ───────────────────────────────────────
-    # Match from "1. Topics" up to the next numbered section "2."
-    sec1_match = re.search(
-        r"\*\*1\.\s*Topics.*?\*\*(.*?)(?=\*\*2\.|\Z)",
-        summary_text,
-        re.DOTALL | re.IGNORECASE,
-    )
-    if not sec1_match:
-        # Fallback: look for any bullet list
-        sec1_match = re.search(r"Topics.*?\n((?:\s*[-•*]\s*.+\n?)+)", summary_text, re.IGNORECASE)
+    start = summary_text.find("---TOPICS_START---")
+    end = summary_text.find("---TOPICS_END---")
 
-    topic_lines = []
-    if sec1_match:
-        block = sec1_match.group(1)
-        for line in block.splitlines():
-            line = line.strip()
-            # Keep lines that look like bullet points
-            cleaned = re.sub(r"^[-•*]\s*", "", line).strip()
-            if cleaned and len(cleaned) > 3 and not cleaned.startswith("**"):
-                topic_lines.append(cleaned)
+    if start == -1 or end == -1:
+        return []
 
-    # ── Section 3: Marks Weightage ─────────────────────────────────────────
-    sec3_match = re.search(
-        r"\*\*3\.\s*Marks.*?\*\*(.*?)(?=\*\*4\.|\Z)",
-        summary_text,
-        re.DOTALL | re.IGNORECASE,
-    )
-    marks_text = sec3_match.group(1) if sec3_match else ""
+    block = summary_text[start + len("---TOPICS_START---"):end].strip()
 
-    def _marks_for(topic_name: str) -> int:
-        """Try to find a mark number near the topic name in the marks section."""
-        # Look for patterns like "Topic Name – 10 marks" or "Topic: 15M"
-        pattern = re.compile(
-            re.escape(topic_name[:12]) + r".{0,40}?(\d+)\s*(?:marks?|M\b)",
-            re.IGNORECASE,
-        )
-        m = pattern.search(marks_text)
-        if m:
-            return int(m.group(1))
-        # Just look for any standalone number near the topic
-        m2 = re.search(re.escape(topic_name[:10]) + r".{0,30}?(\d+)", marks_text, re.IGNORECASE)
-        return int(m2.group(1)) if m2 else 0
+    for line in block.splitlines():
+        line = line.strip()
+        if not line.startswith("TOPIC:"):
+            continue
+        # Format: TOPIC: name | Q: n | M: m
+        rest = line[len("TOPIC:"):].strip()
+        parts = [p.strip() for p in rest.split("|")]
 
-    # Build topic list — assign question counts by position (1st = most repeated)
-    total = len(topic_lines)
-    for i, line in enumerate(topic_lines[:10]):  # cap at 10 topics
-        # Trim long descriptions to a short topic name + description split
-        if ":" in line:
-            name, desc = line.split(":", 1)
-        elif "–" in line or "-" in line:
-            parts = re.split(r"[–\-]", line, maxsplit=1)
-            name, desc = parts[0], parts[1] if len(parts) > 1 else ""
-        else:
-            name, desc = line, ""
+        topic_name = parts[0] if parts else ""
+        if not topic_name or len(topic_name) < 2:
+            continue
 
-        name = name.strip()
-        desc = desc.strip()[:60]
+        def _get_int(parts, prefix, default=0):
+            for p in parts:
+                if p.upper().startswith(prefix.upper()):
+                    val = p.split(":", 1)[-1].strip()
+                    digits = "".join(c for c in val if c.isdigit())
+                    return int(digits) if digits else default
+            return default
 
-        # Assign descending question counts (first topics are most repeated)
-        q_count = max(1, total - i)
+        questions = _get_int(parts, "Q", 1)
+        marks = _get_int(parts, "M", 0)
 
         topics.append({
-            "topic": name,
-            "questions": q_count,
-            "marks": _marks_for(name),
-            "description": desc or name,
+            "topic": topic_name,
+            "questions": max(1, questions),
+            "marks": marks,
+            "description": topic_name,
         })
 
     return topics
 
 
 def generate_topic_heatmap(paper_text: str, cached_summary: str = "") -> dict:
-    """Extract topics for the heatmap.
+    """Extract topics for the heatmap by running/reusing the summary.
 
-    If cached_summary is provided (user already clicked Summarize), parse it
-    directly — zero extra API calls.
+    The summary prompt already produces a structured TOPICS_START block.
+    If cached_summary is provided, parse it directly — zero extra API calls.
 
-    Otherwise, run summarize_paper() to get a fresh summary, then parse it.
-    The summary prompt is reliable and already proven to work.
-
-    Returns {"topics": [...], "summary_used": str}
+    Returns {"topics": [...], "summary_text": str}
     Raises ValueError on failure.
     """
     if not paper_text or len(paper_text.strip()) < 80:
         raise ValueError("Not enough text to analyse topics.")
 
-    # Use cached summary if available, otherwise generate one
-    if cached_summary and len(cached_summary.strip()) > 100:
+    # Use cached summary if it already has the TOPICS block
+    if cached_summary and "---TOPICS_START---" in cached_summary:
         summary = cached_summary
-        print("[topic_heatmap] Using cached summary — no extra API call needed.")
+        print("[topic_heatmap] Using cached summary — no extra API call.")
     else:
-        print("[topic_heatmap] Generating summary to extract topics...")
+        print("[topic_heatmap] Running summary to extract topics...")
         summary = generate_text(SUMMARY_PROMPT.format(paper_text=paper_text[:4000]))
         if not summary or not summary.strip():
             raise ValueError(
                 "The model returned no output. Please try again in a moment."
             )
 
-    topics = _extract_topics_from_summary(summary)
+    topics = _parse_topics_block(summary)
 
     if not topics:
+        # Fallback: model didn't emit the TOPICS block — show a friendly message
         raise ValueError(
-            "Could not extract topics from the summary. "
-            "Try clicking 'Summarize' first, then 'Topic Heatmap'."
+            "The model didn't emit a structured topic list this time. "
+            "Try clicking **Summarize** first, then **Topic Heatmap**."
         )
 
     return {"topics": topics, "summary_text": summary}

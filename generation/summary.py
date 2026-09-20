@@ -18,7 +18,7 @@ not answers or marking schemes.
 Analyse the questions and produce a revision-focused summary with these sections:
 
 **1. Topics & Chapters Covered** (bullet list)
-List every distinct topic or chapter this paper tests. Be specific (e.g. "OS: Deadlocks & Banker's Algorithm", not just "Operating Systems").
+List every distinct topic or chapter this paper tests. Be specific (e.g. "Deadlocks & Banker's Algorithm", not just "Operating Systems").
 
 **2. Question Type Breakdown**
 How many questions are: Theory / Numerical / Derivation / Diagram / Code-based? Give approximate counts.
@@ -30,7 +30,14 @@ Which topics carry the most marks? List top 3-5.
 Pick the 5 most important questions a student must be able to answer — quote them briefly and explain why they matter.
 
 **5. Last-Minute Revision Checklist**
-Give 5-7 specific things a student should study the night before, based purely on what this paper asks."""
+Give 5-7 specific things a student should study the night before, based purely on what this paper asks.
+
+After the summary, output this block EXACTLY (fill in real values, keep the markers):
+---TOPICS_START---
+TOPIC: <topic name> | Q: <number of questions> | M: <marks or 0>
+TOPIC: <topic name> | Q: <number of questions> | M: <marks or 0>
+(repeat for each topic, 5-8 topics total)
+---TOPICS_END---"""
 
 
 def summarize_paper(paper_text: str) -> str:
