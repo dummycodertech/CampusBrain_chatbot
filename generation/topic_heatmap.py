@@ -49,9 +49,11 @@ def generate_topic_heatmap(paper_text: str) -> dict:
     prompt = HEATMAP_PROMPT.format(paper_text=truncated)
 
     topics = []
+    raw = ""
 
     # Attempt 1 — JSON at low temperature
     raw = generate_text(prompt, temperature=0.2, max_tokens=700)
+    print(f"[topic_heatmap] Attempt 1 raw output ({len(raw) if raw else 0} chars): {repr(raw[:300] if raw else '')}")
     if raw and raw.strip():
         topics = _parse_json(raw)
 
@@ -59,6 +61,7 @@ def generate_topic_heatmap(paper_text: str) -> dict:
     if not topics:
         print("[topic_heatmap] Attempt 1 failed — retrying with higher temperature...")
         raw = generate_text(prompt, temperature=0.5, max_tokens=700)
+        print(f"[topic_heatmap] Attempt 2 raw output ({len(raw) if raw else 0} chars): {repr(raw[:300] if raw else '')}")
         if raw and raw.strip():
             topics = _parse_json(raw)
 
@@ -72,14 +75,16 @@ def generate_topic_heatmap(paper_text: str) -> dict:
             f"Exam paper:\n{truncated}"
         )
         raw = generate_text(fallback_prompt, temperature=0.3, max_tokens=400)
+        print(f"[topic_heatmap] Attempt 3 raw output ({len(raw) if raw else 0} chars): {repr(raw[:300] if raw else '')}")
         if raw and raw.strip():
             topics = _parse_pipe(raw)
 
     if not topics:
+        # Show actual model output in the error so we can debug
+        debug_sample = repr(raw[:200]) if raw else "EMPTY STRING"
         raise ValueError(
-            "Could not extract topics from this paper. "
-            "The paper text may be too short or in an unusual format. "
-            "Please try again."
+            f"Could not extract topics from this paper. "
+            f"Model returned: {debug_sample}"
         )
 
     return {"topics": topics}
