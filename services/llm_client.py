@@ -229,12 +229,12 @@ def generate_text(
     infrastructure level), automatically falls back through a model chain.
     Temperature defaults to 0.2 for factual/retrieval tasks.
     """
-    # Fallback chain: primary → llama-3.3-70b-versatile → llama-3.1-8b-instant
+    # Fallback chain using only models confirmed available on this Groq account:
+    # openai/gpt-oss-120b → openai/gpt-oss-20b → qwen/qwen3.8-27b
     model_chain = [model]
-    if model != "llama-3.3-70b-versatile":
-        model_chain.append("llama-3.3-70b-versatile")
-    if "llama-3.1-8b-instant" not in model_chain:
-        model_chain.append("llama-3.1-8b-instant")
+    for fb in ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"]:
+        if fb not in model_chain:
+            model_chain.append(fb)
 
     client = get_groq_client()
     for attempt_model in model_chain:
