@@ -23,12 +23,7 @@ def _render_heatmap(paper_text: str) -> None:
     """Render the topic frequency bar chart + detail table."""
     with st.spinner("Analysing topic distribution..."):
         try:
-            # Pass any cached summary so we don't need an extra API call
-            cached_summary = st.session_state.get("cached_summary", "")
-            data = generate_topic_heatmap(paper_text, cached_summary=cached_summary)
-            # Cache the summary for future heatmap renders
-            if data.get("summary_text") and not cached_summary:
-                st.session_state["cached_summary"] = data["summary_text"]
+            data = generate_topic_heatmap(paper_text)
         except Exception as e:
             st.error(f"Could not generate heatmap: {e}")
             return

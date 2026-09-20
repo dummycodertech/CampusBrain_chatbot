@@ -1,90 +1,147 @@
 """
 Topic-frequency heatmap generator for Campus Brain.
 
-Piggybacks on summarize_paper() which reliably works, then parses the
-structured TOPICS_START/TOPICS_END block the summary prompt emits.
-Parsing is trivial — no regex, no JSON, just splitlines + split('|').
+Zero LLM calls — extracts topics directly from paper text using keyword
+matching and question pattern detection. Fast, reliable, works offline.
+
+Strategy:
+1. Split paper into individual questions by detecting Q1/Q2/a)/b) patterns
+2. Match each question against a subject-specific keyword dictionary
+3. Count how many questions map to each topic
+4. Return sorted topic frequency data
 """
-from generation.summary import summarize_paper, SUMMARY_PROMPT
-from services.llm_client import generate_text
+import re
+from collections import defaultdict
+
+# ── Broad keyword → topic mapping ──────────────────────────────────────────
+# Covers common university subjects. Add more as needed.
+TOPIC_KEYWORDS = {
+    # C / Programming
+    "Pointers": ["pointer", "malloc", "calloc", "free(", "address", "dereference", "*ptr", "void *", "null pointer"],
+    "Arrays": ["array", "1d array", "2d array", "matrix", "subscript", "index"],
+    "Functions": ["function", "recursion", "recursive", "call stack", "return type", "parameter", "argument"],
+    "Strings": ["string", "char[]", "strlen", "strcpy", "strcmp", "strcat", "gets(", "puts("],
+    "Structures & Unions": ["struct", "union", "typedef", "nested struct", "member"],
+    "File Handling": ["file", "fopen", "fclose", "fread", "fwrite", "fprintf", "fscanf", "fgets", "rewind"],
+    "Control Flow": ["loop", "for(", "while(", "do while", "if(", "switch", "break", "continue", "goto"],
+    "Data Types & Variables": ["data type", "int ", "float ", "char ", "double ", "long ", "variable", "constant", "enum"],
+    "Memory Management": ["stack", "heap", "dynamic memory", "memory leak", "allocation", "deallocation"],
+    # Data Structures
+    "Linked Lists": ["linked list", "node", "head pointer", "singly", "doubly", "circular"],
+    "Stacks": ["stack", "push(", "pop(", "peek(", "lifo", "infix", "postfix", "prefix"],
+    "Queues": ["queue", "enqueue", "dequeue", "fifo", "circular queue", "priority queue", "deque"],
+    "Trees": ["tree", "binary tree", "bst", "binary search tree", "inorder", "preorder", "postorder", "height", "depth", "avl", "b-tree"],
+    "Graphs": ["graph", "bfs", "dfs", "breadth first", "depth first", "adjacency", "vertex", "edge", "spanning tree", "dijkstra"],
+    "Sorting": ["sort", "bubble sort", "selection sort", "insertion sort", "merge sort", "quick sort", "heap sort", "time complexity"],
+    "Searching": ["search", "linear search", "binary search", "hashing", "hash table", "collision"],
+    # OS
+    "Processes": ["process", "pcb", "context switch", "fork(", "thread", "multithreading"],
+    "Scheduling": ["scheduling", "fcfs", "sjf", "round robin", "priority scheduling", "gantt"],
+    "Memory Management (OS)": ["paging", "segmentation", "virtual memory", "page fault", "tlb", "frame", "page table"],
+    "Deadlock": ["deadlock", "banker", "resource allocation", "mutual exclusion", "hold and wait", "circular wait"],
+    "Synchronization": ["semaphore", "mutex", "critical section", "race condition", "monitor", "producer consumer"],
+    # DBMS
+    "SQL": ["select ", "insert ", "update ", "delete ", "join", "where ", "group by", "having", "query"],
+    "Normalization": ["normalization", "1nf", "2nf", "3nf", "bcnf", "functional dependency", "candidate key", "primary key"],
+    "Transactions": ["transaction", "acid", "commit", "rollback", "concurrency", "serializability"],
+    "ER Model": ["er diagram", "entity", "relationship", "cardinality", "attribute", "weak entity"],
+    # Networks
+    "OSI Model": ["osi", "layer", "physical layer", "data link", "network layer", "transport layer", "session", "presentation"],
+    "TCP/IP": ["tcp", "ip address", "udp", "socket", "three-way handshake", "http", "dns", "ftp", "smtp"],
+    "Routing": ["routing", "ospf", "rip", "bgp", "router", "forwarding table", "subnet"],
+    # Math / Theory
+    "Complexity": ["complexity", "big o", "o(n)", "o(log", "time complexity", "space complexity", "np", "np-complete"],
+    "Automata": ["automata", "dfa", "nfa", "regular expression", "grammar", "turing machine", "pushdown"],
+    "Probability & Stats": ["probability", "distribution", "mean", "variance", "standard deviation", "bayes"],
+}
 
 
-def _parse_topics_block(summary_text: str) -> list:
-    """Extract topics from the ---TOPICS_START--- block in the summary."""
-    topics = []
+def _split_into_questions(text: str) -> list:
+    """Split paper text into individual question chunks."""
+    # Match Q1, Q.1, 1., 1), a), a., (a), (1) etc.
+    pattern = re.compile(
+        r"(?:^|\n)\s*(?:Q\.?\s*\d+|(?:\d+|[a-zA-Z])[.)]\s+|\([a-zA-Z\d]\)\s+)",
+        re.MULTILINE,
+    )
+    splits = [m.start() for m in pattern.finditer(text)]
+    if not splits:
+        # Fallback: split by sentences
+        return [s.strip() for s in re.split(r"[.?!]\s+", text) if len(s.strip()) > 20]
 
-    start = summary_text.find("---TOPICS_START---")
-    end = summary_text.find("---TOPICS_END---")
+    chunks = []
+    for i, start in enumerate(splits):
+        end = splits[i + 1] if i + 1 < len(splits) else len(text)
+        chunks.append(text[start:end].strip())
+    return chunks
 
-    if start == -1 or end == -1:
-        return []
 
-    block = summary_text[start + len("---TOPICS_START---"):end].strip()
-
-    for line in block.splitlines():
-        line = line.strip()
-        if not line.startswith("TOPIC:"):
-            continue
-        # Format: TOPIC: name | Q: n | M: m
-        rest = line[len("TOPIC:"):].strip()
-        parts = [p.strip() for p in rest.split("|")]
-
-        topic_name = parts[0] if parts else ""
-        if not topic_name or len(topic_name) < 2:
-            continue
-
-        def _get_int(parts, prefix, default=0):
-            for p in parts:
-                if p.upper().startswith(prefix.upper()):
-                    val = p.split(":", 1)[-1].strip()
-                    digits = "".join(c for c in val if c.isdigit())
-                    return int(digits) if digits else default
-            return default
-
-        questions = _get_int(parts, "Q", 1)
-        marks = _get_int(parts, "M", 0)
-
-        topics.append({
-            "topic": topic_name,
-            "questions": max(1, questions),
-            "marks": marks,
-            "description": topic_name,
-        })
-
-    return topics
+def _score_question(question_text: str) -> dict:
+    """Return {topic: score} for a single question based on keyword hits."""
+    lower = question_text.lower()
+    scores = {}
+    for topic, keywords in TOPIC_KEYWORDS.items():
+        hits = sum(1 for kw in keywords if kw.lower() in lower)
+        if hits > 0:
+            scores[topic] = hits
+    return scores
 
 
 def generate_topic_heatmap(paper_text: str, cached_summary: str = "") -> dict:
-    """Extract topics for the heatmap by running/reusing the summary.
+    """Build topic frequency data purely from paper text — no LLM calls.
 
-    The summary prompt already produces a structured TOPICS_START block.
-    If cached_summary is provided, parse it directly — zero extra API calls.
-
-    Returns {"topics": [...], "summary_text": str}
-    Raises ValueError on failure.
+    Returns {"topics": [{"topic", "questions", "marks", "description"}, ...]}
+    Raises ValueError if text is too sparse.
     """
     if not paper_text or len(paper_text.strip()) < 80:
         raise ValueError("Not enough text to analyse topics.")
 
-    # Use cached summary if it already has the TOPICS block
-    if cached_summary and "---TOPICS_START---" in cached_summary:
-        summary = cached_summary
-        print("[topic_heatmap] Using cached summary — no extra API call.")
-    else:
-        print("[topic_heatmap] Running summary to extract topics...")
-        summary = generate_text(SUMMARY_PROMPT.format(paper_text=paper_text[:4000]))
-        if not summary or not summary.strip():
-            raise ValueError(
-                "The model returned no output. Please try again in a moment."
-            )
+    questions = _split_into_questions(paper_text)
+    if not questions:
+        raise ValueError("Could not detect individual questions in this paper.")
 
-    topics = _parse_topics_block(summary)
+    topic_counts = defaultdict(int)
+    topic_marks = defaultdict(int)
 
-    if not topics:
-        # Fallback: model didn't emit the TOPICS block — show a friendly message
+    # Look for mark annotations: (5 marks), [10M], 5 marks, etc.
+    marks_pattern = re.compile(r"\[?(\d+)\s*(?:marks?|M)\]?", re.IGNORECASE)
+
+    for q in questions:
+        scores = _score_question(q)
+        if not scores:
+            continue
+        best_topic = max(scores, key=scores.get)
+        topic_counts[best_topic] += 1
+        # Try to extract marks from this question
+        m = marks_pattern.search(q)
+        if m:
+            topic_marks[best_topic] += int(m.group(1))
+
+    if not topic_counts:
+        # Fallback: count keyword frequency across the whole text
+        lower = paper_text.lower()
+        for topic, keywords in TOPIC_KEYWORDS.items():
+            hits = sum(lower.count(kw.lower()) for kw in keywords)
+            if hits >= 2:
+                topic_counts[topic] = hits
+
+    if not topic_counts:
         raise ValueError(
-            "The model didn't emit a structured topic list this time. "
-            "Try clicking **Summarize** first, then **Topic Heatmap**."
+            "No recognisable topics found in this paper. "
+            "The paper may be in an unusual format or language."
         )
 
-    return {"topics": topics, "summary_text": summary}
+    # Sort by frequency, take top 8
+    sorted_topics = sorted(topic_counts.items(), key=lambda x: x[1], reverse=True)[:8]
+
+    topics = []
+    for name, count in sorted_topics:
+        desc_keywords = TOPIC_KEYWORDS.get(name, [])
+        desc = ", ".join(desc_keywords[:3]) if desc_keywords else name
+        topics.append({
+            "topic": name,
+            "questions": count,
+            "marks": topic_marks.get(name, 0),
+            "description": desc,
+        })
+
+    return {"topics": topics}
