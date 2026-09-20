@@ -224,18 +224,36 @@ def generate_text(
 ) -> str:
     """Send a text prompt to Groq and return the completion string.
 
-    Default model is openai/gpt-oss-120b -- Groq's recommended replacement
-    for the decommissioned llama-3.3-70b-versatile (retired Aug 2026).
-    Temperature defaults to 0.2 for factual/retrieval tasks; callers that
-    want more expressive prose should pass a higher value (e.g. 0.5).
+    Tries the requested model first. If it returns None/empty content (which
+    Groq does silently when the model is overloaded or rate-limited at the
+    infrastructure level), automatically falls back through a model chain.
+    Temperature defaults to 0.2 for factual/retrieval tasks.
     """
+    # Fallback chain: primary → llama-3.3-70b-versatile → llama-3.1-8b-instant
+    model_chain = [model]
+    if model != "llama-3.3-70b-versatile":
+        model_chain.append("llama-3.3-70b-versatile")
+    if "llama-3.1-8b-instant" not in model_chain:
+        model_chain.append("llama-3.1-8b-instant")
+
     client = get_groq_client()
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
-    content = response.choices[0].message.content
-    # Groq can return None for content when finish_reason is 'stop' with no output
-    return content if content is not None else ""
+    for attempt_model in model_chain:
+        try:
+            response = client.chat.completions.create(
+                model=attempt_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            content = response.choices[0].message.content
+            finish_reason = response.choices[0].finish_reason
+            if content:
+                if attempt_model != model:
+                    print(f"[generate_text] Used fallback model {attempt_model} (primary returned empty)")
+                return content
+            # content is None or empty
+            print(f"[generate_text] {attempt_model} returned empty content, finish_reason={finish_reason} — trying next model")
+        except Exception as e:
+            print(f"[generate_text] {attempt_model} raised {type(e).__name__}: {e} — trying next model")
+
+    return ""
