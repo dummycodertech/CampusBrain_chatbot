@@ -1,102 +1,129 @@
 """
 Topic-frequency heatmap generator for Campus Brain.
 
-Uses pipe-delimited table format instead of JSON — avoids all JSON parsing
-issues. The model handles table formats very reliably.
-
-Free-tier optimized:
-- Single call, one retry on empty.
-- Paper truncated to 5000 chars (~1250 tokens).
+Uses pipe-delimited table format — avoids JSON parsing failures entirely.
+Free-tier optimized: single call, one retry, 3000 char paper truncation.
 """
 from services.llm_client import generate_text
 
-_MAX_CHARS = 5000
+_MAX_CHARS = 3000   # Keep prompt short so model has room to output
+_MIN_CHARS = 100
 
-HEATMAP_PROMPT = """You are an exam paper analyser.
-
-Read the exam paper below and identify its main topics.
+HEATMAP_PROMPT = """You are an exam paper analyser. Read the exam paper below and list the main topics.
 
 EXAM PAPER:
 {paper_text}
 
-Output a table with EXACTLY this format — one topic per line, pipe-separated:
-TOPIC | QUESTIONS | MARKS | DESCRIPTION
+List 5-8 topics as a pipe-delimited table. Each line must follow this exact format:
+TopicName | NumQuestions | TotalMarks | OneLineDescription
+
+Example output (copy this style exactly):
+Data Structures | 4 | 20 | Arrays, linked lists, trees and graphs
+Operating Systems | 3 | 15 | Process scheduling and memory management
+DBMS | 2 | 10 | SQL queries and normalization
 
 Rules:
-- TOPIC: name of the topic (short, clear)
-- QUESTIONS: integer count of questions about this topic
-- MARKS: integer total marks allocated (0 if not shown)
-- DESCRIPTION: under 10 words describing what the topic covers
-- List 5 to 10 topics, sorted by QUESTIONS descending
-- Output ONLY the data rows, no headers, no extra text
-
-Example output:
-Digital Logic | 3 | 15 | Boolean algebra, gates and Karnaugh maps
-Microprocessors | 2 | 10 | 8085 architecture and instruction set
-Memory Systems | 1 | 5 | RAM, ROM types and organisation"""
+- NumQuestions and TotalMarks must be plain integers (e.g. 3, not "3 questions")
+- Use 0 for marks if not shown in the paper
+- Sort by NumQuestions descending
+- Output ONLY the data rows — no header row, no numbering, no extra text"""
 
 
 def generate_topic_heatmap(paper_text: str) -> dict:
-    """Extract topics from a paper as a pipe-delimited table — very reliable.
+    """Extract topics from a paper as a pipe-delimited table.
 
     Returns:
         {"topics": [{"topic": str, "questions": int, "marks": int, "description": str}, ...]}
+
+    Raises ValueError with a user-friendly message on failure.
     """
+    if not paper_text or len(paper_text.strip()) < _MIN_CHARS:
+        raise ValueError(
+            "This paper has very little extractable text "
+            "(possibly a scanned PDF where OCR yielded no content). "
+            "The heatmap cannot be generated without readable text."
+        )
+
     truncated = paper_text[:_MAX_CHARS]
     if len(paper_text) > _MAX_CHARS:
         truncated += "\n[... paper continues ...]"
 
     prompt = HEATMAP_PROMPT.format(paper_text=truncated)
 
-    raw = generate_text(prompt, temperature=0.3, max_tokens=1000)
+    # Attempt 1
+    raw = generate_text(prompt, temperature=0.2, max_tokens=600)
+    topics = _parse_table(raw) if raw and raw.strip() else []
 
-    # Retry once if empty
-    if not raw or not raw.strip():
-        print("[topic_heatmap] Empty response — retrying...")
-        raw = generate_text(prompt, temperature=0.5, max_tokens=1000)
+    # Attempt 2: retry with higher temp if nothing parsed
+    if not topics:
+        print("[topic_heatmap] No topics parsed — retrying...")
+        raw = generate_text(prompt, temperature=0.5, max_tokens=600)
+        topics = _parse_table(raw) if raw and raw.strip() else []
 
-    if not raw or not raw.strip():
-        raise ValueError(
-            "The model returned no output. This may be a temporary rate-limit. Please try again."
+    # Attempt 3: fallback with a simpler numbered-list prompt
+    if not topics:
+        print("[topic_heatmap] Still empty — trying fallback numbered-list prompt...")
+        fallback_prompt = (
+            "List the main topics in this exam paper as a simple numbered list.\n"
+            "Format each line as:  TopicName | number_of_questions\n\n"
+            f"Exam paper:\n{truncated}"
         )
-
-    return _parse_table(raw)
-
-
-def _parse_table(raw: str) -> dict:
-    """Parse pipe-delimited table rows into a dict.
-
-    Skips any header line or malformed row gracefully.
-    """
-    topics = []
-    for line in raw.strip().splitlines():
-        line = line.strip()
-        # Skip empty lines, header-like lines, or separator lines
-        if not line or "|" not in line:
-            continue
-        # Skip if it looks like a header (TOPIC | QUESTIONS ...)
-        if "TOPIC" in line.upper() and "QUESTIONS" in line.upper():
-            continue
-
-        parts = [p.strip() for p in line.split("|")]
-        if len(parts) < 4:
-            continue
-
-        try:
-            topics.append({
-                "topic": parts[0],
-                "questions": int("".join(c for c in parts[1] if c.isdigit()) or "1"),
-                "marks": int("".join(c for c in parts[2] if c.isdigit()) or "0"),
-                "description": parts[3],
-            })
-        except (ValueError, IndexError):
-            # Skip malformed rows silently
-            continue
+        raw = generate_text(fallback_prompt, temperature=0.3, max_tokens=400)
+        topics = _parse_table(raw) if raw and raw.strip() else []
 
     if not topics:
         raise ValueError(
-            "Could not extract topics from the model response. "
-            f"Raw output was:\n{raw[:400]}"
+            "Could not extract topics from this paper. "
+            "The paper text may be too short, in an unusual format, "
+            "or the model is temporarily unavailable. Please try again."
         )
 
     return {"topics": topics}
+
+
+def _parse_table(raw: str) -> list:
+    """Parse pipe-delimited rows — very defensive, handles varied model output."""
+    topics = []
+    for line in raw.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        # Strip leading numbering like "1." or "1)"
+        import re
+        line = re.sub(r"^\d+[\.\)]\s*", "", line)
+
+        # Need at least one pipe to be a table row
+        if "|" not in line:
+            continue
+
+        # Skip obvious header rows
+        upper = line.upper()
+        if ("TOPIC" in upper and ("QUESTION" in upper or "MARK" in upper)
+                and upper.index("TOPIC") < 10):
+            continue
+
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 2:
+            continue
+
+        topic_name = parts[0]
+        if not topic_name or len(topic_name) > 80:
+            continue
+
+        def _to_int(s: str, default: int = 0) -> int:
+            digits = "".join(c for c in s if c.isdigit())
+            return int(digits) if digits else default
+
+        questions = _to_int(parts[1], default=1) if len(parts) > 1 else 1
+        marks = _to_int(parts[2], default=0) if len(parts) > 2 else 0
+        description = parts[3].strip() if len(parts) > 3 else ""
+
+        topics.append({
+            "topic": topic_name,
+            "questions": questions,
+            "marks": marks,
+            "description": description,
+        })
+
+    return topics
