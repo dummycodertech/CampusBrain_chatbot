@@ -167,30 +167,48 @@ try:
 
 except Exception as _ingest_err:
     _msg = str(_ingest_err)
-    if "429" in _msg or "RESOURCE_EXHAUSTED" in _msg or "rate" in _msg.lower():
+    _msg_lower = _msg.lower()
+
+    if "password" in _msg_lower or "encrypted" in _msg_lower or "cannot open" in _msg_lower:
+        st.error(
+            "🔒 **Password-protected or encrypted PDF.**\n\n"
+            "This PDF requires a password to open. Please use an unlocked version of the file."
+        )
+    elif "429" in _msg or "RESOURCE_EXHAUSTED" in _msg or "rate" in _msg_lower:
         st.error(
             "⚠️ **Gemini API rate limit reached.**\n\n"
-            "The free tier allows only **20 OCR requests per day**. "
-            "All available API keys are temporarily exhausted.\n\n"
-            "**What you can do:**\n"
+            "The free tier allows only **20 OCR requests per day** (scanned PDFs only — "
+            "text-based PDFs use zero quota).\n\n"
+            "**Options:**\n"
             "- Wait a few minutes and try again\n"
-            "- Try a PDF that has selectable text (not a scanned image) — those use zero API quota\n"
-            "- Add another Gemini API key in Streamlit Cloud → Settings → Secrets"
+            "- Try a PDF with selectable text instead of a scanned image\n"
+            "- Add another Gemini API key to your `.env` file"
         )
-    elif "API key" in _msg or "api_key" in _msg.lower() or "INVALID" in _msg:
+    elif "api key" in _msg_lower or "api_key" in _msg_lower or "invalid" in _msg_lower:
         st.error(
-            "🔑 **Gemini API key error.**\n\n"
-            "The API key is missing or invalid. Check your Streamlit Cloud secrets and make sure "
-            "`GEMINI_API_KEY` (or `GEMINI_API_KEYS`) is set correctly."
+            "🔑 **API key error.**\n\n"
+            "Check that `GEMINI_API_KEY` is set correctly in your `.env` file."
+        )
+    elif "fileerror" in _msg_lower or "cannot open" in _msg_lower or "no objects" in _msg_lower:
+        st.error(
+            "🗂️ **Corrupt or unreadable PDF.**\n\n"
+            "This file could not be parsed. It may be corrupted or not a valid PDF. "
+            "Try re-downloading or re-exporting the file."
         )
     else:
-        st.error(f"❌ Failed to process this paper: {_msg}")
+        st.error(f"❌ **Failed to process this paper:**\n\n`{_msg}`")
     st.stop()
 
-if not paper_text:
-    st.error("Could not extract text from this paper.")
+# ─── Guard: paper text could be empty if all pages had failed OCR ─────────
+if not paper_text or not paper_text.strip():
+    st.warning(
+        "⚠️ **No text could be extracted from this PDF.**\n\n"
+        "This usually happens when:\n"
+        "- The PDF is a scanned image and the Gemini OCR quota is exhausted\n"
+        "- The PDF contains only images with no readable text\n\n"
+        "Try again with a text-based PDF, or wait for the OCR quota to reset."
+    )
     st.stop()
-
 
 # ─── Actions + Chat ───────────────────────────────────────────
 render_action_buttons(paper_text)

@@ -44,7 +44,11 @@ def render_chat_box(paper_text: str) -> None:
     intent = route_intent(question)
     with st.spinner("Thinking..."):
         if intent == "quiz":
-            content, msg_type = generate_quiz(paper_text), "quiz"
+            try:
+                content, msg_type = generate_quiz(paper_text), "quiz"
+            except Exception as _qe:
+                content = f"Sorry, I couldn't generate a quiz right now: {_qe}"
+                msg_type = "text"
         elif intent == "summary":
             content, msg_type = summarize_paper(paper_text), "text"
         elif intent == "flashcards":

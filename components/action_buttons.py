@@ -147,27 +147,46 @@ def render_action_buttons(paper_text: str) -> None:
 
     with col1:
         if st.button("📝 Summarize", use_container_width=True):
-            with st.spinner("Summarizing..."):
-                summary = summarize_paper(paper_text)
-            # Cache for heatmap reuse
-            st.session_state["cached_summary"] = summary
-            st.session_state.messages.append(
-                {"role": "assistant", "content": summary, "type": "text"}
-            )
-            st.session_state.show_heatmap = False
-            st.session_state.show_checker = False
-            st.rerun()
+            if not paper_text or len(paper_text.strip()) < 100:
+                st.warning(
+                    "⚠️ **Not enough text was extracted from this paper** to generate a summary.\n\n"
+                    "This can happen when the subject has very few papers or the PDF is mostly images/diagrams. "
+                    "Try opening the paper directly to verify the text was captured."
+                )
+            else:
+                with st.spinner("Summarizing..."):
+                    summary = summarize_paper(paper_text)
+                # Cache for heatmap reuse
+                st.session_state["cached_summary"] = summary
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": summary, "type": "text"}
+                )
+                st.session_state.show_heatmap = False
+                st.session_state.show_checker = False
+                st.rerun()
 
     with col2:
         if st.button("🧠 Quiz Me", use_container_width=True):
-            with st.spinner("Building quiz..."):
-                quiz = generate_quiz(paper_text)
-            st.session_state.messages.append(
-                {"role": "assistant", "content": quiz, "type": "quiz"}
-            )
-            st.session_state.show_heatmap = False
-            st.session_state.show_checker = False
-            st.rerun()
+            if not paper_text or len(paper_text.strip()) < 100:
+                st.warning(
+                    "⚠️ **Not enough text was extracted from this paper** to generate a quiz.\n\n"
+                    "This can happen when the subject has very few papers or the PDF is mostly images/diagrams. "
+                    "Try opening the paper directly to verify the text was captured."
+                )
+            else:
+                with st.spinner("Building quiz..."):
+                    try:
+                        quiz = generate_quiz(paper_text)
+                    except Exception as _qe:
+                        st.error(f"Could not generate quiz: {_qe}")
+                        quiz = None
+                if quiz:
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": quiz, "type": "quiz"}
+                    )
+                    st.session_state.show_heatmap = False
+                    st.session_state.show_checker = False
+                    st.rerun()
 
     with col3:
         if st.button("🗑 Clear Chat", use_container_width=True):

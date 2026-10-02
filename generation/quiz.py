@@ -9,6 +9,7 @@ This is deliberately better than the paper itself: a student gets fresh
 practice questions on exactly the topics their exam covers.
 """
 import json
+import re
 from services.llm_client import generate_text
 
 QUIZ_PROMPT = """You are an expert exam tutor for university students.
@@ -36,10 +37,56 @@ Rules:
 ]}}"""
 
 
+def _extract_json(raw: str) -> str:
+    """Robustly extract the first JSON object from raw LLM output.
+
+    Handles:
+    - Bare JSON with no fences
+    - ```json ... ``` or ``` ... ``` fences (with or without trailing newlines)
+    - Extra explanation text before/after the JSON block
+    - Numerical values, special characters, graph notation in the paper text
+    """
+    # 1. Try stripping a markdown code fence (most common case)
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw, re.IGNORECASE)
+    if fence_match:
+        candidate = fence_match.group(1).strip()
+        try:
+            return candidate
+        except Exception:
+            pass
+
+    # 2. Try finding a JSON object directly (greedy, from first { to last })
+    obj_match = re.search(r"(\{[\s\S]*\})", raw)
+    if obj_match:
+        return obj_match.group(1).strip()
+
+    # 3. Fallback: return the whole thing stripped and hope for the best
+    return raw.strip()
+
+
 def generate_quiz(paper_text: str) -> dict:
+    """Generate a 5-question MCQ quiz from a PYQ paper.
+
+    Returns a dict with key ``quiz`` containing a list of question dicts.
+    On any JSON parse failure, returns a single-item quiz with an error
+    message so the UI never crashes.
+    """
     raw = generate_text(QUIZ_PROMPT.format(paper_text=paper_text))
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        cleaned = cleaned[4:] if cleaned.lower().startswith("json") else cleaned
-    return json.loads(cleaned.strip())
+
+    if not raw or not raw.strip():
+        return {"quiz": [{"question": "Quiz generation failed — the AI returned an empty response. Please try again.",
+                          "options": ["A. Retry", "B. Try a different paper", "C. Check API quota", "D. Contact support"],
+                          "correct_answer": "A. Retry"}]}
+
+    cleaned = _extract_json(raw)
+    try:
+        data = json.loads(cleaned)
+        # Validate expected structure
+        if "quiz" not in data or not isinstance(data["quiz"], list):
+            raise ValueError("Unexpected JSON structure — 'quiz' list missing.")
+        return data
+    except (json.JSONDecodeError, ValueError) as exc:
+        print(f"[quiz] JSON parse failed: {exc}\nRaw output (first 500 chars):\n{raw[:500]}")
+        return {"quiz": [{"question": f"Quiz could not be parsed from the AI response. Raw error: {exc}",
+                          "options": ["A. Retry", "B. Try a different paper", "C. Check API quota", "D. Contact support"],
+                          "correct_answer": "A. Retry"}]}
