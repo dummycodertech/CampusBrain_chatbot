@@ -23,10 +23,31 @@ import streamlit as st
 # On Streamlit Cloud, secrets live in st.secrets (not os.environ).
 # Copy them into os.environ so every module that uses os.environ.get() works
 # identically in both local and cloud environments.
-for _k, _v in st.secrets.items():
-    if isinstance(_v, str):
-        # Always overwrite so Cloud secrets take priority over any stale env.
-        os.environ[_k] = _v
+# Handles both flat secrets and nested [section] tables.
+def _copy_secrets_to_env():
+    """Recursively copy st.secrets into os.environ.
+
+    Supports:
+    - Flat string secrets:  GEMINI_API_KEY = "key1,key2"
+    - Numbered key secrets: GEMINI_API_KEY_1 = "key1"  / GEMINI_API_KEY_2 = "key2"
+    - Nested sections:      [gemini]\n  api_key = "key1"
+    """
+    import streamlit as _st
+
+    def _flatten(mapping, prefix=""):
+        for k, v in mapping.items():
+            full_key = f"{prefix}{k}" if not prefix else f"{prefix}_{k}"
+            if isinstance(v, str):
+                os.environ[full_key.upper()] = v
+            elif hasattr(v, "items"):  # nested section / AttrDict
+                _flatten(v, prefix=full_key.upper())
+
+    try:
+        _flatten(_st.secrets)
+    except Exception as _se:
+        print(f"[app] Warning: could not copy st.secrets to env: {_se}")
+
+_copy_secrets_to_env()
 
 # Normalise key name: the rotation logic in llm_client.py reads GEMINI_API_KEYS
 # (plural).  Accept both spellings so either works.
@@ -34,6 +55,28 @@ if "GEMINI_API_KEYS" not in os.environ and "GEMINI_API_KEY" in os.environ:
     os.environ["GEMINI_API_KEYS"] = os.environ["GEMINI_API_KEY"]
 elif "GEMINI_API_KEY" not in os.environ and "GEMINI_API_KEYS" in os.environ:
     os.environ["GEMINI_API_KEY"] = os.environ["GEMINI_API_KEYS"]
+
+# Also support numbered keys: GEMINI_API_KEY_1, GEMINI_API_KEY_2, ...
+# Merge them into the comma-separated GEMINI_API_KEYS string.
+_numbered_keys = []
+_i = 1
+while True:
+    _k = os.environ.get(f"GEMINI_API_KEY_{_i}", "").strip()
+    if not _k:
+        break
+    _numbered_keys.append(_k)
+    _i += 1
+
+if _numbered_keys:
+    _existing = [k.strip() for k in os.environ.get("GEMINI_API_KEYS", "").split(",") if k.strip()]
+    _merged = list(dict.fromkeys(_existing + _numbered_keys))  # deduplicate, preserve order
+    os.environ["GEMINI_API_KEYS"] = ",".join(_merged)
+    os.environ["GEMINI_API_KEY"] = os.environ["GEMINI_API_KEYS"]
+    print(f"[app] Merged {len(_numbered_keys)} numbered key(s) into GEMINI_API_KEYS")
+
+# Diagnostic: show key count in logs so we can confirm new keys are picked up.
+_raw_keys = [k.strip() for k in os.environ.get("GEMINI_API_KEYS", "").split(",") if k.strip()]
+print(f"[app] Gemini API keys configured: {len(_raw_keys)} key(s) found")
 
 # Log whether optional integrations are available (visible in Streamlit Cloud logs).
 _tavily_present = bool(os.environ.get("TAVILY_API_KEY", "").strip())

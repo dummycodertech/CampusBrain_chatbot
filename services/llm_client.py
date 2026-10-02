@@ -27,6 +27,7 @@ from groq import Groq
 _gemini_clients = []
 _current_client_idx = 0
 _exhausted_keys = set()   # indices of keys that hit daily/permanent limits
+_loaded_keys_str = ""    # tracks which key string was last loaded (to detect changes)
 # Only gemini-2.5-flash is confirmed working on free tier (campus brain dashboard shows 1/20 RPD)
 # gemini-2.0-flash → limit=0 (blocked), gemini-2.0-flash-lite → also blocked, gemini-1.5-flash → 404
 VISION_MODEL = "gemini-2.5-flash"
@@ -34,24 +35,52 @@ VISION_MODEL_FALLBACK = "gemini-2.5-flash-lite"  # lighter variant, separate quo
 
 
 def _init_gemini_clients():
-    global _gemini_clients
-    if not _gemini_clients:
-        keys_str = os.environ.get("GEMINI_API_KEYS", "") or os.environ.get("GEMINI_API_KEY", "")
-        keys = [k.strip() for k in keys_str.split(",") if k.strip()]
+    """(Re-)initialize Gemini clients from the current environment.
+
+    Called on every API attempt so that newly added keys (added to .env /
+    Streamlit secrets and the app restarted) are picked up immediately.
+    If the key string has changed since the last load, the client list and
+    exhausted-key set are fully reset.
+    """
+    global _gemini_clients, _current_client_idx, _exhausted_keys, _loaded_keys_str
+    keys_str = os.environ.get("GEMINI_API_KEYS", "") or os.environ.get("GEMINI_API_KEY", "")
+    keys = [k.strip() for k in keys_str.split(",") if k.strip()]
+
+    if not keys:
+        raise ValueError("No Gemini API keys found in environment.")
+
+    # Only rebuild if keys have actually changed (avoids re-creating clients on every call)
+    if keys_str != _loaded_keys_str:
         _gemini_clients = [genai.Client(api_key=k) for k in keys]
-        if not _gemini_clients:
-            raise ValueError("No Gemini API keys found in environment.")
-        print(f"[llm_client] Loaded {len(_gemini_clients)} Gemini API key(s).")
+        _loaded_keys_str = keys_str
+        _exhausted_keys = set()   # reset exhausted set — new keys deserve a fresh start
+        _current_client_idx = 0
+        print(f"[llm_client] (Re)loaded {len(_gemini_clients)} Gemini API key(s).")
+
+
+def reset_gemini_clients():
+    """Force a full reload of Gemini clients on next call (e.g. after env change)."""
+    global _loaded_keys_str, _exhausted_keys
+    _loaded_keys_str = ""
+    _exhausted_keys = set()
+    print("[llm_client] Gemini client cache cleared — will reload on next call.")
+
 
 def get_current_gemini_client() -> genai.Client:
     _init_gemini_clients()
     return _gemini_clients[_current_client_idx]
 
+
 def rotate_gemini_client():
+    """Advance to the next non-exhausted key. Wraps around the key list."""
     global _current_client_idx
     _init_gemini_clients()
-    _current_client_idx = (_current_client_idx + 1) % len(_gemini_clients)
-    print(f"[llm_client] Switched to Gemini API key #{_current_client_idx + 1} of {len(_gemini_clients)}")
+    num_keys = len(_gemini_clients)
+    for _ in range(num_keys):
+        _current_client_idx = (_current_client_idx + 1) % num_keys
+        if _current_client_idx not in _exhausted_keys:
+            break
+    print(f"[llm_client] Switched to Gemini API key #{_current_client_idx + 1} of {num_keys}")
 
 def get_num_keys() -> int:
     _init_gemini_clients()
