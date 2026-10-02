@@ -239,7 +239,11 @@ except Exception as _ingest_err:
             "Try re-downloading or re-exporting the file."
         )
     else:
-        st.error(f"❌ **Failed to process this paper:**\n\n`{_msg}`")
+        st.error(
+            f"❌ **Failed to process this paper:**\n\n"
+            f"```\n{_msg}\n```\n\n"
+            f"Check the Streamlit Cloud logs for the full `[llm_client]` error line."
+        )
     st.stop()
 
 # ─── Guard: paper text could be empty if all pages had failed OCR ─────────

@@ -163,23 +163,29 @@ def generate_vision(contents: list, model: str = VISION_MODEL) -> str:
                 return response.text
 
             except genai_errors.APIError as e:
-                # Log the real code/status to stdout (visible in Streamlit Cloud logs)
+                # Log the FULL error so we can diagnose in Streamlit Cloud logs
                 code = getattr(e, "code", None)
                 status = getattr(e, "status", None)
-                print(f"[llm_client] Key #{idx + 1} / {current_model} → error code={code} status={status}")
+                msg = str(e)
+                print(
+                    f"[llm_client] Key #{idx + 1} / {current_model} → "
+                    f"code={code} status={status} msg={msg!r}"
+                )
 
                 is_rate_limit = (
                     code == 429
                     or str(code) == "429"
                     or status == "RESOURCE_EXHAUSTED"
                 )
-                is_server_error = code is not None and int(code) >= 500
+                try:
+                    is_server_error = code is not None and int(code) >= 500
+                except (TypeError, ValueError):
+                    is_server_error = False
                 is_not_found = code == 404
 
                 if is_not_found:
-                    # This model isn't available — stop trying it entirely
                     print(f"[llm_client] Model {current_model} returned 404 — skipping all keys for this model.")
-                    break  # break inner loop, try next model in models_to_try
+                    break
 
                 if is_rate_limit or is_server_error:
                     last_exception = e
@@ -199,8 +205,9 @@ def generate_vision(contents: list, model: str = VISION_MODEL) -> str:
                         )
                         time.sleep(min(delay, 10))
                 else:
-                    # Unexpected error — log and re-raise
-                    print(f"[llm_client] Unexpected error (code={code}), re-raising.")
+                    # Unexpected error (e.g. 401 invalid key, 403 forbidden)
+                    # — re-raise so it surfaces in the UI error message
+                    print(f"[llm_client] Unexpected/auth error (code={code}) — re-raising: {msg!r}")
                     raise
 
             except Exception as e:
