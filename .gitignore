@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 storage/cache.db
 .streamlit/secrets.toml
+checkpoints.db
+*.png
