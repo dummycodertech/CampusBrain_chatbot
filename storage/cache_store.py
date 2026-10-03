@@ -46,9 +46,15 @@ class CacheStore:
             conn.commit()
 
     def is_cached(self, paper_id: str) -> bool:
+        """Return True only if the paper has at least one page with real text.
+
+        A paper cached with all-empty text (e.g. from a previous failed OCR
+        attempt) is treated as NOT cached so it gets re-ingested.
+        """
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT 1 FROM pages WHERE paper_id = ? LIMIT 1", (paper_id,)
+                "SELECT 1 FROM pages WHERE paper_id = ? AND TRIM(text) != '' LIMIT 1",
+                (paper_id,),
             ).fetchone()
             return row is not None
 
