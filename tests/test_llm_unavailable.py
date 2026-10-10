@@ -1,4 +1,4 @@
-﻿"""
+"""
 Unit tests for LLMUnavailableError propagation.
 
 Tests that when generate_text raises LLMUnavailableError, every generation
@@ -75,8 +75,10 @@ def test_knowledge_answer_returns_friendly_msg_on_llm_error():
     with patch("generation.qa.search_web", return_value=[]), \
          patch("generation.qa.generate_text", side_effect=_always_raises):
         result = knowledge_answer("Explain deadlock")
-    assert isinstance(result, str)
-    assert result.strip() != ""
+    assert isinstance(result, tuple)
+    content, scope = result
+    assert isinstance(content, str)
+    assert content.strip() != ""
 
 
 # ── qa: answer_question ───────────────────────────────────────────────────────
@@ -94,9 +96,9 @@ def test_generate_text_raises_on_all_models_failing():
     from unittest.mock import MagicMock
     import services.llm_client as llmc
 
-    # Build a mock client whose chat.completions.create always raises
+    # Build a mock client whose chat.completions.with_raw_response.create always raises
     mock_client = MagicMock()
-    mock_client.chat.completions.create.side_effect = Exception("network error")
+    mock_client.chat.completions.with_raw_response.create.side_effect = Exception("network error")
     # Stub models.list so _get_active_model_chain does not need a real key
     mock_client.models.list.return_value = MagicMock(data=[])
 
