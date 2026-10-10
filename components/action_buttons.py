@@ -2,11 +2,11 @@
 Action buttons for Campus Brain.
 
 Buttons in order:
-  Row 1: Summarize | Quiz Me | Clear Chat
-  Row 2: Topic Heatmap | Answer Checker | Export Chat
+  Row 1: Summarize | Quiz Me | Flashcards | Clear Chat
+  Row 2: Topic Heatmap | Top 5 Topics | Exam Predictor | Check Answer | Export Chat
+  Row 3: Mock Paper
 
-Topic Heatmap and Answer Checker are rendered inline below the buttons via
-session-state flags so they don't interfere with the chat history scroll.
+Panels are rendered inline below the buttons via session-state flags.
 """
 import io
 import datetime
@@ -291,6 +291,153 @@ def _render_predictor(paper_text: str, subject: str = "") -> None:
         st.write("No repeated questions found across the selected years.")
 
 
+def _render_mock_paper(paper_text: str, subject: str = "") -> None:
+    """Render the Mock Paper panel: structure editor, generate, download."""
+    import re
+    import pandas as pd
+    from storage.cache_store import CacheStore
+    from generation.topic_tagger import ensure_tagged, get_last_notice
+    from generation.mock_paper import (
+        DEFAULT_STRUCTURE, build_mock_paper, to_text,
+    )
+
+    st.markdown(
+        '<p style="color:#c4b5fd; font-weight:600; font-size:1.05rem; margin-bottom:0.5rem;">'
+        "📄 Mock Paper Generator</p>",
+        unsafe_allow_html=True,
+    )
+    st.caption("Built from real past questions, weighted by topic frequency. Not a prediction.")
+
+    store = CacheStore()
+    current_paper_id = st.session_state.get("current_paper_id", "")
+    sub = (subject or "").strip()
+    if not sub or sub.lower() == "unknown":
+        if current_paper_id:
+            sub = store.get_paper_subject(current_paper_id) or ""
+    if not sub or sub.lower() == "unknown":
+        sub = "General"
+
+    papers = store.get_subject_papers(sub) if sub != "General" else []
+    if not papers and paper_text and paper_text.strip():
+        m = re.search(r"20\d{2}", paper_text[:1000])
+        curr_year = m.group(0) if m else "Uploaded"
+        papers = [(current_paper_id or "current", curr_year, paper_text)]
+
+    if not papers:
+        st.info("Open the heatmap or Top 5 first, or upload more papers of this subject.")
+        return
+
+    # Tag papers
+    total_p = len(papers)
+    prog = st.progress(0, text="Preparing topics...")
+    def _on_prog(done, total):
+        pct = done / total if total > 0 else 1.0
+        prog.progress(pct, text=f"Tagging paper {done} of {total}...")
+
+    tagged_results = ensure_tagged(papers, sub, max_new=6, on_progress=_on_prog)
+    prog.empty()
+
+    # Keep only entries with rows
+    tagged = [(year, rows) for pid, year, rows, used_llm in tagged_results if rows]
+
+    if not tagged:
+        notice = None
+        for pid, year, rows, used_llm in tagged_results:
+            n = get_last_notice(pid)
+            if n:
+                notice = n
+                break
+        msg = notice or "No tagged questions yet. Open the heatmap or Top 5 first."
+        st.info(msg)
+        return
+
+    # Structure editor
+    st.markdown("**Paper structure** (edit rows as needed):")
+    default_df = pd.DataFrame(DEFAULT_STRUCTURE)
+    struct_df = st.data_editor(
+        default_df,
+        column_config={
+            "section": st.column_config.TextColumn("Section"),
+            "marks":   st.column_config.NumberColumn("Marks",  min_value=1, max_value=20, step=1),
+            "count":   st.column_config.NumberColumn("Count",  min_value=1, max_value=15, step=1),
+        },
+        num_rows="dynamic",
+        use_container_width=True,
+        key="mock_structure_editor",
+    )
+
+    col_gen, col_shuf = st.columns([2, 1])
+    with col_gen:
+        generate_clicked = st.button("Generate Mock Paper", use_container_width=True)
+    with col_shuf:
+        shuffle_clicked = st.button("🔀 Shuffle", use_container_width=True)
+
+    if shuffle_clicked:
+        import random as _rnd
+        st.session_state["mock_seed"] = _rnd.randint(0, 2**31)
+
+    if generate_clicked or shuffle_clicked or st.session_state.get("mock_paper") is not None:
+        if generate_clicked or shuffle_clicked:
+            structure = struct_df.to_dict(orient="records") if struct_df is not None and not struct_df.empty else DEFAULT_STRUCTURE
+            seed = st.session_state.get("mock_seed")
+            paper = build_mock_paper(tagged, structure=structure, seed=seed)
+            st.session_state["mock_paper"] = paper
+        else:
+            paper = st.session_state["mock_paper"]
+
+        # Show warnings
+        for w in paper.get("warnings", []):
+            st.warning(w)
+
+        # Render paper inline
+        st.markdown(f"**Total Marks: {paper['total_marks']}**")
+        global_n = 1
+        for sec in paper.get("sections", []):
+            st.markdown(f"**{sec['section']}** — {sec['marks']} marks each")
+            for q in sec.get("questions", []):
+                adj_note = " *(marks adjusted)*" if q.get("adjusted") else ""
+                st.markdown(f"{global_n}. {q['text']}  `[{q['marks']} marks]`{adj_note}")
+                global_n += 1
+
+        # PDF download (with text fallback if reportlab missing)
+        _pdf_ok = True
+        try:
+            from generation.mock_paper import to_pdf_bytes
+            pdf_bytes = to_pdf_bytes(paper, title=f"Mock Paper — {sub}")
+        except ImportError:
+            _pdf_ok = False
+            st.info("PDF export unavailable; using text export.")
+
+        text_bytes = to_text(paper, title=f"Mock Paper — {sub}").encode("utf-8")
+
+        dl_col1, dl_col2 = st.columns(2)
+        with dl_col1:
+            if _pdf_ok:
+                st.download_button(
+                    label="⬇ Download PDF",
+                    data=pdf_bytes,
+                    file_name="mock_paper.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            else:
+                st.download_button(
+                    label="⬇ Download Text",
+                    data=text_bytes,
+                    file_name="mock_paper.txt",
+                    mime="text/plain",
+                    use_container_width=True,
+                )
+        with dl_col2:
+            st.download_button(
+                label="📋 Download Plain Text",
+                data=text_bytes,
+                file_name="mock_paper.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
+
+
 def _render_answer_checker(paper_text: str) -> None:
     """Render the answer checker input form."""
     st.markdown(
@@ -477,6 +624,8 @@ def render_action_buttons(paper_text: str, subject: str = "") -> None:
             st.session_state.show_top_topics = False
             st.session_state.show_predictor = False
             st.session_state.show_checker = False
+            st.session_state.show_mock = False
+            st.session_state.pop("mock_paper", None)
             st.rerun()
 
     st.markdown("<div style='margin-bottom: 0.4rem;'></div>", unsafe_allow_html=True)
@@ -490,6 +639,7 @@ def render_action_buttons(paper_text: str, subject: str = "") -> None:
             st.session_state.show_top_topics = False
             st.session_state.show_predictor = False
             st.session_state.show_checker = False
+            st.session_state.show_mock = False
 
     with col5:
         if st.button("🏆 Top 5 Topics", use_container_width=True):
@@ -497,6 +647,7 @@ def render_action_buttons(paper_text: str, subject: str = "") -> None:
             st.session_state.show_heatmap = False
             st.session_state.show_predictor = False
             st.session_state.show_checker = False
+            st.session_state.show_mock = False
 
     with col6:
         if st.button("🎯 Exam Predictor", use_container_width=True):
@@ -504,6 +655,7 @@ def render_action_buttons(paper_text: str, subject: str = "") -> None:
             st.session_state.show_heatmap = False
             st.session_state.show_top_topics = False
             st.session_state.show_checker = False
+            st.session_state.show_mock = False
 
     with col7:
         if st.button("✅ Check Answer", use_container_width=True):
@@ -511,6 +663,7 @@ def render_action_buttons(paper_text: str, subject: str = "") -> None:
             st.session_state.show_heatmap = False
             st.session_state.show_top_topics = False
             st.session_state.show_predictor = False
+            st.session_state.show_mock = False
 
     with col8:
         if st.session_state.get("messages"):
@@ -531,6 +684,17 @@ def render_action_buttons(paper_text: str, subject: str = "") -> None:
                 help="Start a conversation first to enable export.",
             )
 
+    # ── Row 3: mock paper ─────────────────────────────────────────────────────
+    st.markdown("<div style='margin-bottom: 0.4rem;'></div>", unsafe_allow_html=True)
+    mock_col, _ = st.columns([1, 4])
+    with mock_col:
+        if st.button("📄 Mock Paper", use_container_width=True):
+            st.session_state.show_mock = not st.session_state.get("show_mock", False)
+            st.session_state.show_heatmap = False
+            st.session_state.show_top_topics = False
+            st.session_state.show_predictor = False
+            st.session_state.show_checker = False
+
     # ── Inline panels (toggled by buttons above) ──────────────────────────────
     if st.session_state.get("show_heatmap"):
         st.markdown("---")
@@ -547,5 +711,9 @@ def render_action_buttons(paper_text: str, subject: str = "") -> None:
     if st.session_state.get("show_checker"):
         st.markdown("---")
         _render_answer_checker(paper_text)
+
+    if st.session_state.get("show_mock"):
+        st.markdown("---")
+        _render_mock_paper(paper_text, subject=subject)
 
     st.markdown("---")
