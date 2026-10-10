@@ -15,42 +15,27 @@ from generation.flashcards import generate_flashcards
 def _extract_letter_and_text(opt_str: str) -> Tuple[Optional[str], str]:
     """Extract option letter (e.g. 'A', 'B') and remaining text from an option string."""
     s = str(opt_str).strip()
-    m = re.match(r"^(?:option\s+)?\(?([A-Da-d])\)?(?:[.):\s-]\s*|\s+)(.*)$", s, re.IGNORECASE)
-    if m:
-        return m.group(1).upper(), m.group(2).strip().lower()
-    if re.match(r"^[A-Da-d]$", s, re.IGNORECASE):
-        return s.upper(), ""
+    if not s:
+        return None, ""
+    m_single = re.match(r"^(?:option\s+)?\(?([A-Da-d])\)?$", s, re.IGNORECASE)
+    if m_single:
+        return m_single.group(1).upper(), ""
+    m_prefix = re.match(r"^(?:option\s+)?(?:\(([A-Da-d])\)\s*|([A-Da-d])\s*[.):-]\s*)(.*)$", s, re.IGNORECASE)
+    if m_prefix:
+        letter = (m_prefix.group(1) or m_prefix.group(2)).upper()
+        text = m_prefix.group(3).strip().lower()
+        return letter, text
     return None, s.lower()
 
 
 def check_quiz_answer(selected: str, correct: str) -> bool:
-    """Compare selected radio option with correct_answer by option letter and text."""
     if not selected or not correct:
         return False
-    sel = str(selected).strip()
-    cor = str(correct).strip()
-    if sel.lower() == cor.lower():
-        return True
-
-    sel_letter, sel_text = _extract_letter_and_text(sel)
-    cor_letter, cor_text = _extract_letter_and_text(cor)
-
-    # 1. Compare by option letter
-    if sel_letter and cor_letter and sel_letter == cor_letter:
-        return True
-    if sel_letter and cor.strip().upper() == sel_letter:
-        return True
-    if cor_letter and sel.strip().upper() == cor_letter:
-        return True
-
-    # 2. Compare by text
-    if sel_text and cor_text:
-        if sel_text == cor_text:
-            return True
-        if sel_text in cor_text or cor_text in sel_text:
-            return True
-
-    return False
+    sel_letter, sel_text = _extract_letter_and_text(selected)
+    cor_letter, cor_text = _extract_letter_and_text(correct)
+    if sel_letter and cor_letter:
+        return sel_letter == cor_letter
+    return " ".join(sel_text.split()) == " ".join(cor_text.split())
 
 
 def render_chat_box(paper_text: str) -> None:
