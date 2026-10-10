@@ -13,7 +13,7 @@
 
 | Feature | Description |
 |---|---|
-| 📄 **Smart PDF Ingestion** | Three-layer pipeline: direct text extraction → Tesseract OCR → optional Gemini Vision upgrade. Zero quota consumed for text-based PDFs. |
+| 📄 **Smart PDF Ingestion** | Intelligent pipeline: direct text extraction → local Tesseract OCR (with multi-PSM retry and image preprocessing). Zero external API cost. |
 | 🗺️ **Subject Tagging** | Automatically detects and tags each page to its subject using regex header matching + configurable semester curricula |
 | 💬 **Two-path Q&A** | Concept questions → LLM knowledge base; paper-specific questions → grounded in extracted text |
 | 📝 **Summarize** | One-click paper summary highlighting key topics and section weights |
@@ -41,20 +41,15 @@ PyMuPDF — direct text extraction
     └── < 80 chars (scanned page)
             │
             ▼
-        Tesseract OCR  (free, local, unlimited)
+        Preprocess (Grayscale → Autocontrast → Median Filter → Threshold)
             │
-            ├── ≥ 50 chars extracted?  →  Done ✅  (Gemini never called)
+            ▼
+        Tesseract OCR (300 DPI, multi-PSM retry: 6 → 4 → 3)
             │
-            └── < 50 chars (very poor scan)
-                    │
-                    ├── Gemini keys configured?
-                    │       ├── YES  →  Gemini Vision upgrade 🔑 (optional)
-                    │       └── NO   →  Keep Tesseract result
-                    │
-                    └── Done
+            └── Done ✅  (zero API cost, line reconstructed)
 ```
 
-**Result:** Gemini Vision is never called in normal usage. It only activates as a quality upgrade for genuinely unreadable pages when API keys are explicitly configured.
+**Result:** Fast, local, memory-safe OCR ingestion running on Tesseract with zero external API quota consumed.
 
 ### Text Generation Pipeline
 
@@ -79,7 +74,7 @@ campus-brain/
 │
 ├── ingestion/
 │   ├── pdf_to_images.py          # Hybrid PyMuPDF extraction + image rendering
-│   ├── ocr_tagger.py             # Tesseract OCR (primary) + Gemini Vision (optional fallback)
+│   ├── ocr_tagger.py             # Tesseract OCR pipeline with line reconstruction & subject tagging
 │   ├── cache_writer.py           # Ingestion orchestrator — idempotent, SQLite-backed
 │   └── subject_reference.py      # Loads expected subject list for a branch/semester
 │
@@ -101,7 +96,7 @@ campus-brain/
 │   └── intent_router.py          # Keyword-based intent detection for the chat interface
 │
 ├── services/
-│   ├── llm_client.py             # Groq (text) + Gemini (vision, optional) wrappers with key rotation
+│   ├── llm_client.py             # Groq text wrapper with fallback model chain
 │   └── web_search.py             # Tavily web search integration
 │
 ├── components/
@@ -122,7 +117,6 @@ campus-brain/
 - Python 3.10+
 - [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) installed locally
 - A [Groq API key](https://console.groq.com/) — free tier works
-- *(Optional)* A [Gemini API key](https://aistudio.google.com/app/apikey) — only needed for very poor quality scans
 
 ### Install Tesseract
 
@@ -156,7 +150,6 @@ pip install -r requirements.txt
 # Create a .env file with:
 GROQ_API_KEY="gsk_..."
 TAVILY_API_KEY="tvly-..."          # optional — enables web search
-GEMINI_API_KEY="AIzaSy..."        # optional — only for very poor scan quality upgrade
 
 # 5. Run the app
 streamlit run app.py
@@ -229,31 +222,11 @@ PYQ PDFs are semester-wide bundles mixing several subjects. Ingestion needs the 
 ```toml
 GROQ_API_KEY = "gsk_..."
 TAVILY_API_KEY = "tvly-..."          # optional
-
-# Optional — only for quality upgrade on very poor scans:
-# GEMINI_API_KEY = "AIzaSy...key1,AIzaSy...key2"   # comma-separated for key rotation
 ```
 
 5. Deploy — app is publicly accessible at `https://<your-app>.streamlit.app`
 
 > **Note:** The SQLite cache lives on Streamlit Cloud's ephemeral filesystem and resets on each redeploy. Users will need to re-process PDFs after a new deployment. For production persistence, migrate `cache_store.py` to an external database (Supabase, PlanetScale, etc.).
-
----
-
-## 🔑 Gemini API Key Rotation (Optional)
-
-If Gemini keys are configured, the client rotates across multiple keys automatically:
-
-```env
-GEMINI_API_KEY="AIzaSy...key1,AIzaSy...key2,AIzaSy...key3"
-```
-
-The rotation logic:
-- Tries each key in round-robin order
-- Waits the API-advertised `retryDelay` on per-minute limits
-- Permanently skips keys that hit daily quotas
-- Falls back to `gemini-2.5-flash-lite` (separate quota pool) if all primary keys are exhausted
-- Reloads the key list if the environment variable changes (process restart required)
 
 ---
 
@@ -263,8 +236,7 @@ The rotation logic:
 |---|---|---|
 | UI Framework | Streamlit 1.38 | |
 | PDF Parsing | PyMuPDF (fitz) | Text extraction + image rendering |
-| OCR (primary) | **Tesseract OCR** + pytesseract | Free, local, no quota |
-| OCR (fallback) | Gemini 2.5 Flash (`google-genai`) | Optional — poor scans only |
+| OCR | **Tesseract OCR** + pytesseract | Free, local, no quota |
 | Text Generation | Groq — `openai/gpt-oss-120b` | With `gpt-oss-20b` + `qwen3.8-27b` fallback chain |
 | Web Search | Tavily | Optional |
 | Cache / Storage | SQLite (`sqlite3`) | Only stores pages with real extracted text |

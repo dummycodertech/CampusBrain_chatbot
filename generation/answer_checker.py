@@ -11,7 +11,7 @@ Design choices for free-tier efficiency:
 - Returns a plain string (no JSON parsing needed), so there's zero risk of
   parse failure causing a crash.
 """
-from services.llm_client import generate_text
+from services.llm_client import generate_text, LLMUnavailableError
 
 _MAX_PAPER_CHARS = 4000
 
@@ -59,6 +59,7 @@ def check_answer(paper_text: str, question: str, student_answer: str) -> str:
 
     Returns:
         A formatted markdown string with score, verdict, feedback, and model answer.
+        Returns a friendly error string if the LLM is unavailable.
     """
     # Truncate paper to keep token usage low
     paper_context = paper_text[:_MAX_PAPER_CHARS]
@@ -70,4 +71,11 @@ def check_answer(paper_text: str, question: str, student_answer: str) -> str:
         question=question.strip(),
         student_answer=student_answer.strip(),
     )
-    return generate_text(prompt, temperature=0.2)
+    try:
+        return generate_text(prompt, temperature=0.2)
+    except LLMUnavailableError:
+        return (
+            "⚠️ **The AI is busy or rate-limited.**\n\n"
+            "Please try again in a minute. "
+            "If this keeps happening, check that your `GROQ_API_KEY` is valid and has quota remaining."
+        )

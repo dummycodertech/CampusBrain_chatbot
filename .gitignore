@@ -6,3 +6,11 @@ storage/cache.db
 .streamlit/secrets.toml
 checkpoints.db
 *.png
+
+# Local Vector Database & Index files (Strictly Local)
+chroma_db/
+.chroma/
+faiss_index/
+storage/chroma_db/
+storage/*.index
+

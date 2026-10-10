@@ -399,6 +399,24 @@ hr {
     0%, 100% { opacity: 1; }
     50%       { opacity: 0.3; }
 }
+
+/* ─── Scope pill for off-topic questions ─────────────────── */
+.scope-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: #93c5fd;
+    background: rgba(59, 130, 246, 0.12);
+    border: 1px solid rgba(59, 130, 246, 0.25);
+    border-radius: 99px;
+    padding: 0.35rem 0.9rem;
+    margin-bottom: 0.8rem;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    line-height: 1.4;
+}
 </style>
 
 <!-- Aurora blobs -->

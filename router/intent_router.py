@@ -50,8 +50,25 @@ _KNOWLEDGE_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+_STOPWORDS = {
+    "about", "above", "after", "again", "against", "also", "been", "before", "being",
+    "below", "between", "both", "cannot", "could", "does", "doing", "down", "during",
+    "each", "from", "further", "have", "having", "here", "into", "itself", "more",
+    "most", "myself", "other", "ought", "ours", "ourselves", "over", "same", "should",
+    "some", "such", "than", "that", "their", "theirs", "them", "themselves", "then",
+    "there", "these", "they", "this", "those", "through", "under", "until", "very",
+    "were", "what", "when", "where", "which", "while", "with", "would", "your",
+    "yours", "yourself", "yourselves", "tell", "give", "show", "find",
+}
 
-def route_intent(user_text: str) -> str:
+
+def route_intent(user_text: str, paper_text: str = "") -> str:
+    """Route user query to an intent handler.
+
+    If paper_text is supplied and user_text shares no meaningful words (lowercase,
+    ignoring stopwords and words < 4 letters) with paper_text in the final fallback,
+    routes to 'knowledge' instead of 'qa'.
+    """
     text = user_text.strip().lower()
     if any(word in text for word in QUIZ_KEYWORDS):
         return "quiz"
@@ -68,5 +85,15 @@ def route_intent(user_text: str) -> str:
         return "knowledge"
     if _KNOWLEDGE_PATTERNS.match(user_text.strip()):
         return "knowledge"
-    return "qa"
 
+    # Final fallback: if paper_text is provided, check for shared meaningful words
+    if paper_text and paper_text.strip():
+        q_words = {
+            w for w in re.findall(r"\b[a-z]{4,}\b", text)
+            if w not in _STOPWORDS
+        }
+        p_words = set(re.findall(r"\b[a-z]{4,}\b", paper_text.lower()))
+        if q_words and not (q_words & p_words):
+            return "knowledge"
+
+    return "qa"

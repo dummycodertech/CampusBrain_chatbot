@@ -17,6 +17,7 @@ Design principles
 from dotenv import load_dotenv
 load_dotenv()  # works locally
 
+import html
 import os
 import streamlit as st
 
@@ -28,9 +29,8 @@ def _copy_secrets_to_env():
     """Recursively copy st.secrets into os.environ.
 
     Supports:
-    - Flat string secrets:  GEMINI_API_KEY = "key1,key2"
-    - Numbered key secrets: GEMINI_API_KEY_1 = "key1"  / GEMINI_API_KEY_2 = "key2"
-    - Nested sections:      [gemini]\n  api_key = "key1"
+    - Flat string secrets:  GROQ_API_KEY = "gsk_..."
+    - Nested sections:      [groq]\\n  api_key = "gsk_..."
     """
     import streamlit as _st
 
@@ -49,50 +49,23 @@ def _copy_secrets_to_env():
 
 _copy_secrets_to_env()
 
-# Normalise key name: the rotation logic in llm_client.py reads GEMINI_API_KEYS
-# (plural).  Accept both spellings so either works.
-if "GEMINI_API_KEYS" not in os.environ and "GEMINI_API_KEY" in os.environ:
-    os.environ["GEMINI_API_KEYS"] = os.environ["GEMINI_API_KEY"]
-elif "GEMINI_API_KEY" not in os.environ and "GEMINI_API_KEYS" in os.environ:
-    os.environ["GEMINI_API_KEY"] = os.environ["GEMINI_API_KEYS"]
-
-# Also support numbered keys: GEMINI_API_KEY_1, GEMINI_API_KEY_2, ...
-# Merge them into the comma-separated GEMINI_API_KEYS string.
-_numbered_keys = []
-_i = 1
-while True:
-    _k = os.environ.get(f"GEMINI_API_KEY_{_i}", "").strip()
-    if not _k:
-        break
-    _numbered_keys.append(_k)
-    _i += 1
-
-if _numbered_keys:
-    _existing = [k.strip() for k in os.environ.get("GEMINI_API_KEYS", "").split(",") if k.strip()]
-    _merged = list(dict.fromkeys(_existing + _numbered_keys))  # deduplicate, preserve order
-    os.environ["GEMINI_API_KEYS"] = ",".join(_merged)
-    os.environ["GEMINI_API_KEY"] = os.environ["GEMINI_API_KEYS"]
-    print(f"[app] Merged {len(_numbered_keys)} numbered key(s) into GEMINI_API_KEYS")
-
-# Diagnostic: show key count in logs so we can confirm new keys are picked up.
-_raw_keys = [k.strip() for k in os.environ.get("GEMINI_API_KEYS", "").split(",") if k.strip()]
-print(f"[app] Gemini API keys configured: {len(_raw_keys)} key(s) found")
-
 # Log whether optional integrations are available (visible in Streamlit Cloud logs).
 _tavily_present = bool(os.environ.get("TAVILY_API_KEY", "").strip())
 print(f"[app] Tavily web search: {'enabled' if _tavily_present else 'disabled (no TAVILY_API_KEY)'}")
 
 from components.theme import inject_stitch_theme
 from ingestion.cache_writer import ingest_paper
+from ingestion.subject_reference import get_branches_and_semesters, get_expected_subjects
 from retrieval.paper_lookup import get_paper_text
 from components.action_buttons import render_action_buttons
 from components.chat_box import render_chat_box
+from components.usage_meter import render_usage_meter
 
 st.set_page_config(
     page_title="Campus Brain",
     page_icon="🧠",
     layout="centered",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="auto",
 )
 
 inject_stitch_theme()
@@ -107,6 +80,8 @@ branch     = params.get("branch", "")
 semester   = params.get("semester", "")
 
 is_local_upload = False
+is_other = False
+typed_subject = ""
 
 if not paper_id or not pdf_url:
     # ─── Landing hero ─────────────────────────────────────────
@@ -133,6 +108,50 @@ if not paper_id or not pdf_url:
 
     # ─── Frosted glass upload panel ───────────────────────────
     st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
+
+    if not branch or not semester:
+        branches, semesters = get_branches_and_semesters()
+        branch_options = branches + ["Other / not listed"]
+        semester_options = semesters + ["Other / not listed"]
+
+        col1, col2 = st.columns(2)
+        with col1:
+            b_idx = branch_options.index(branch) if branch in branch_options else 0
+            selected_branch = st.selectbox(
+                "Branch",
+                options=branch_options,
+                index=b_idx,
+                key="upload_branch",
+            )
+        with col2:
+            if selected_branch == "Other / not listed":
+                selected_semester = "Other / not listed"
+                st.selectbox(
+                    "Semester",
+                    options=["Other / not listed"],
+                    disabled=True,
+                    key="upload_semester",
+                )
+            else:
+                s_idx = semester_options.index(semester) if semester in semester_options else 0
+                selected_semester = st.selectbox(
+                    "Semester",
+                    options=semester_options,
+                    index=s_idx,
+                    key="upload_semester",
+                )
+
+        if selected_branch == "Other / not listed" or selected_semester == "Other / not listed":
+            is_other = True
+            typed_subject = st.text_input(
+                "Subject name",
+                placeholder="Enter subject name",
+                key="upload_typed_subject",
+            )
+        else:
+            branch = selected_branch
+            semester = selected_semester
+
     uploaded_file = st.file_uploader(
         "",
         type=["pdf"],
@@ -153,12 +172,28 @@ if not paper_id or not pdf_url:
     if not uploaded_file:
         st.stop()
 
+    if is_other and not typed_subject.strip():
+        st.warning("Please enter the subject name above.")
+        st.stop()
+
     import hashlib
     file_bytes = uploaded_file.getvalue()
     paper_id       = hashlib.md5(file_bytes).hexdigest()
-    subject        = uploaded_file.name
+    subject        = typed_subject.strip() if is_other else uploaded_file.name
     year           = "Uploaded"
     is_local_upload = True
+
+    if not is_other:
+        from storage.cache_store import CacheStore
+        store = CacheStore()
+        if store.is_cached(paper_id):
+            with store._connect() as conn:
+                row = conn.execute(
+                    "SELECT subject FROM pages WHERE paper_id = ? AND subject != 'Unknown' LIMIT 1",
+                    (paper_id,),
+                ).fetchone()
+                if row and row[0]:
+                    subject = row[0]
 
 # ─── Session reset on new paper ───────────────────────────────
 # Guard: clear the chat history whenever the active paper changes so
@@ -176,35 +211,57 @@ st.markdown(
     <div style="padding: 3rem 0 0.5rem; text-align: center; position: relative; z-index: 1;">
         <div class="paper-badge">
             <div class="live-dot"></div>
-            {badge}
+            {html.escape(str(badge))}
         </div>
     </div>
     <div class="hero-title" style="font-size: 2.2rem; letter-spacing: -1px; margin-bottom: 1.5rem;">
-        {title}
+        {html.escape(str(title))}
     </div>
     """,
     unsafe_allow_html=True,
 )
 
 # ─── Ingest paper ─────────────────────────────────────────────
+_ocr_warnings: list = []
 try:
     with st.spinner("Scanning document..."):
         if is_local_upload:
             from storage.cache_store import CacheStore
             store = CacheStore()
             if not store.is_cached(paper_id):
-                import tempfile, os
+                import tempfile
                 from pathlib import Path
                 from ingestion.cache_writer import ingest_local_paper
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                     tmp.write(file_bytes)
                     tmp_path = Path(tmp.name)
                 try:
-                    ingest_local_paper(paper_id, tmp_path, year=year, known_subjects=[subject])
+                    if is_other:
+                        known_subjects = [subject] if subject else ["Unknown"]
+                    else:
+                        known_subjects = get_expected_subjects(branch, semester)
+                    _ocr_warnings = ingest_local_paper(
+                        paper_id, tmp_path, year=year, known_subjects=known_subjects
+                    )
                 finally:
                     os.remove(tmp_path)
+
+                if not is_other:
+                    with store._connect() as conn:
+                        row = conn.execute(
+                            "SELECT subject FROM pages WHERE paper_id = ? AND subject != 'Unknown' LIMIT 1",
+                            (paper_id,),
+                        ).fetchone()
+                        if row and row[0]:
+                            subject = row[0]
         else:
-            ingest_paper(paper_id=paper_id, pdf_url=pdf_url, year=year, branch=branch, semester=semester)
+            _ocr_warnings = ingest_paper(
+                paper_id=paper_id,
+                pdf_url=pdf_url,
+                year=year,
+                branch=branch,
+                semester=semester,
+            )
 
         paper_text = get_paper_text(paper_id)
 
@@ -217,20 +274,14 @@ except Exception as _ingest_err:
             "🔒 **Password-protected or encrypted PDF.**\n\n"
             "This PDF requires a password to open. Please use an unlocked version of the file."
         )
-    elif "429" in _msg or "RESOURCE_EXHAUSTED" in _msg or "rate" in _msg_lower:
+    elif "tesseract" in _msg_lower and ("not found" in _msg_lower or "not installed" in _msg_lower):
         st.error(
-            "⚠️ **Gemini API rate limit reached.**\n\n"
-            "The free tier allows only **20 OCR requests per day** (scanned PDFs only — "
-            "text-based PDFs use zero quota).\n\n"
-            "**Options:**\n"
-            "- Wait a few minutes and try again\n"
-            "- Try a PDF with selectable text instead of a scanned image\n"
-            "- Add another Gemini API key to your `.env` file"
-        )
-    elif "api key" in _msg_lower or "api_key" in _msg_lower or "invalid" in _msg_lower:
-        st.error(
-            "🔑 **API key error.**\n\n"
-            "Check that `GEMINI_API_KEY` is set correctly in your `.env` file."
+            "🔍 **Tesseract OCR is not installed.**\n\n"
+            "This PDF appears to be scanned (image-only) and requires Tesseract to read.\n\n"
+            "**What to try:**\n"
+            "- Use a PDF with selectable text — it works without Tesseract\n"
+            "- If on Streamlit Cloud: ensure `packages.txt` contains `tesseract-ocr`\n"
+            "- Locally: install Tesseract via your OS package manager"
         )
     elif "fileerror" in _msg_lower or "cannot open" in _msg_lower or "no objects" in _msg_lower:
         st.error(
@@ -242,21 +293,44 @@ except Exception as _ingest_err:
         st.error(
             f"❌ **Failed to process this paper:**\n\n"
             f"```\n{_msg}\n```\n\n"
-            f"Check the Streamlit Cloud logs for the full `[llm_client]` error line."
+            f"Check the Streamlit Cloud logs for the full error."
         )
     st.stop()
 
+# ─── Non-blocking OCR warnings ───────────────────────────────
+# Shown after ingestion; don't block the UI — the student can still use
+# the text that WAS extracted successfully.
+if _ocr_warnings:
+    _tesseract_missing = any(
+        w.startswith("TESSERACT_MISSING") for w in _ocr_warnings
+    )
+    if _tesseract_missing:
+        st.error(
+            "🔍 **Tesseract OCR is not installed — scanned pages cannot be read.**\n\n"
+            "Digital-text PDFs still work normally. To enable OCR:\n"
+            "- Streamlit Cloud: ensure `packages.txt` contains `tesseract-ocr`\n"
+            "- Local: install Tesseract via your OS package manager"
+        )
+    else:
+        for w in _ocr_warnings:
+            st.warning(f"⚠️ **{w}** — some questions may be missing or inaccurate.")
+
 # ─── Guard: paper text could be empty if all pages had failed OCR ─────────
 if not paper_text or not paper_text.strip():
-    st.warning(
+    st.error(
         "⚠️ **No text could be extracted from this PDF.**\n\n"
         "This usually happens when:\n"
-        "- The PDF is a scanned image and the Gemini OCR quota is exhausted\n"
-        "- The PDF contains only images with no readable text\n\n"
-        "Try again with a text-based PDF, or wait for the OCR quota to reset."
+        "- The PDF contains only scanned images and OCR failed\n"
+        "- Tesseract OCR is not installed or the page quality is too low\n"
+        "- The PDF is corrupted or uses an unsupported image format\n\n"
+        "**What to try:**\n"
+        "- Use a PDF with selectable text instead of a scanned image\n"
+        "- Ensure Tesseract OCR is installed on the server (`packages.txt` should list `tesseract-ocr`)\n"
+        "- Re-download or re-export the PDF and try again"
     )
     st.stop()
 
 # ─── Actions + Chat ───────────────────────────────────────────
-render_action_buttons(paper_text)
+render_action_buttons(paper_text, subject=subject)
 render_chat_box(paper_text)
+render_usage_meter()

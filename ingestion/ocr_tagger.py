@@ -1,28 +1,40 @@
 """
-Tags and extracts text from PDF pages.
+OCR and subject-tagging pipeline for Campus Brain.
 
-OCR Strategy (priority order)
-------------------------------
-1. PyMuPDF text extraction (free, instant) — used for text-based pages.
-2. Tesseract OCR (free, local, no quota) — used for scanned/image pages.
-3. Gemini Vision (optional fallback) — only used if GEMINI_API_KEYS is set
-   AND Tesseract returns too little text (< TESSERACT_MIN_CHARS chars).
-
-This means the app works fully offline (OCR-wise) with no Gemini API key.
-Gemini is kept as a quality-upgrade fallback for cases where Tesseract
-struggles (e.g. dense math, poor scan quality).
+OCR Strategy
+------------
+1. PyMuPDF text extraction (free, instant) — for text-based pages
+   (handled upstream in pdf_to_images.iter_pages; we receive the text directly).
+2. Tesseract OCR (free, local, no quota) — for scanned/image pages.
+   - Pages are preprocessed (grayscale → autocontrast → median filter → threshold)
+     before being passed to Tesseract.
+   - Multi-PSM retry: tries PSM 6 first; if confidence < 70 retries PSM 4 then
+     PSM 3, keeping the result with the highest mean confidence.
+   - Line breaks are preserved by grouping words on (block_num, par_num, line_num),
+     joining words with spaces and lines with "\\n". This is critical for the
+     downstream question splitter in topic_heatmap.py.
 
 Subject detection
 -----------------
-For all OCR engines, after extracting raw text we run lightweight regex +
-string matching to detect subject-header pages.  No LLM call needed.
-"""
-import os
-import re
-from typing import List, Dict, Tuple, Optional
-from PIL import Image
+Regex + string matching against a configurable subject list; no LLM call needed.
+Subject is forward-filled across pages (a new header re-tags subsequent pages).
 
-# ── Tesseract setup ────────────────────────────────────────────────────────────
+Memory safety
+-------------
+tag_and_extract_all() processes pages from an iterator one at a time and
+explicitly del-s each PIL Image before requesting the next, so peak memory
+stays constant regardless of document length.
+"""
+from __future__ import annotations
+
+import re
+from collections import defaultdict, OrderedDict
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple
+
+from PIL import Image, ImageFilter, ImageOps
+
+
+# ── Tesseract probe ───────────────────────────────────────────────────────────
 
 def _tesseract_available() -> bool:
     try:
@@ -33,24 +45,135 @@ def _tesseract_available() -> bool:
         return False
 
 
-def _ocr_with_tesseract(image: Image.Image) -> str:
-    """Run Tesseract on a PIL Image and return extracted text."""
+# ── Image preprocessing ───────────────────────────────────────────────────────
+
+def preprocess(img: Image.Image, threshold: int = 160) -> Image.Image:
+    """Prepare a page image for Tesseract OCR. Tunable threshold (default 160).
+
+    Pipeline:
+    1. Grayscale — colour carries no information for text OCR.
+    2. Autocontrast — stretch the pixel histogram to fill [0, 255].
+    3. Median filter (3×3) — suppress salt-and-pepper noise without blurring edges.
+    4. Threshold (tunable) — binarise: dark text stays dark, background becomes white.
+
+    Returns an "L"-mode (grayscale) image.
+    """
+    img = img.convert("L")
+    img = ImageOps.autocontrast(img)
+    img = img.filter(ImageFilter.MedianFilter(size=3))
+    img = img.point(lambda x: 255 if x > threshold else 0)
+    return img
+
+
+# ── Line reconstruction ────────────────────────────────────────────────────────
+
+def _reconstruct_lines(data: dict) -> str:
+    """Rebuild text from pytesseract.image_to_data output, preserving layout.
+
+    Groups words by (block_num, par_num, line_num) in reading order:
+    - Words on the same line are joined with spaces.
+    - Lines in the same paragraph are joined with newlines ("\\n").
+    - Paragraphs are separated with blank lines ("\\n\\n").
+    Words with confidence == -1 (non-text regions) or empty words are skipped.
+    """
+    paragraphs: OrderedDict[tuple, OrderedDict[int, list[str]]] = OrderedDict()
+
+    n = len(data.get("text", []))
+    for i in range(n):
+        try:
+            conf = int(data["conf"][i])
+        except (ValueError, TypeError, KeyError):
+            continue
+        word = str(data["text"][i]).strip()
+        if conf == -1 or not word:
+            continue
+        block = int(data["block_num"][i])
+        par = int(data["par_num"][i])
+        line = int(data["line_num"][i])
+        par_key = (block, par)
+        if par_key not in paragraphs:
+            paragraphs[par_key] = OrderedDict()
+        if line not in paragraphs[par_key]:
+            paragraphs[par_key][line] = []
+        paragraphs[par_key][line].append(word)
+
+    par_texts = []
+    for lines in paragraphs.values():
+        par_text = "\n".join(" ".join(words) for words in lines.values() if words)
+        if par_text:
+            par_texts.append(par_text)
+
+    return "\n\n".join(par_texts)
+
+
+def _compute_page_conf(data: dict) -> Tuple[float, int]:
+    """Compute page average word confidence from conf field (ignoring conf == -1).
+
+    Returns:
+        (avg_conf, confident_word_count)
+    """
+    valid_confs = []
+    n = len(data.get("text", []))
+    for i in range(n):
+        try:
+            c = int(data["conf"][i])
+        except (ValueError, TypeError, KeyError):
+            continue
+        word = str(data["text"][i]).strip()
+        if c != -1 and word:
+            valid_confs.append(c)
+
+    if not valid_confs:
+        return 0.0, 0
+    return sum(valid_confs) / len(valid_confs), len(valid_confs)
+
+
+# ── OCR with PSM retry ────────────────────────────────────────────────────────
+
+def ocr_page(img: Image.Image) -> Tuple[str, float]:
+    """OCR a preprocessed page image with multi-PSM retry and quality check.
+
+    Strategy:
+    - Run pytesseract with --psm 6 (uniform block of text).
+    - If output has <30 chars or avg confidence <40, retry with --psm 4
+      (single column of variable text sizes), then --psm 3 (fully automatic).
+    - Return the result with the highest avg confidence.
+    - Empty/garbled check: if confident word count < 10 or avg confidence < 35,
+      return empty text so garbage is not cached.
+    """
     import pytesseract
-    # PSM 6 = assume uniform block of text (best for exam papers)
-    custom_config = r"--oem 3 --psm 6"
-    return pytesseract.image_to_string(image, config=custom_config)
 
+    attempts = []
+    for psm in [6, 4, 3]:
+        config = f"--oem 3 --psm {psm}"
+        data = pytesseract.image_to_data(
+            img, config=config, output_type=pytesseract.Output.DICT
+        )
+        avg_conf, word_count = _compute_page_conf(data)
+        text = _reconstruct_lines(data)
+        attempts.append({
+            "psm": psm,
+            "text": text,
+            "avg_conf": avg_conf,
+            "word_count": word_count,
+        })
+        # If output meets quality threshold, accept immediately
+        if len(text.strip()) >= 30 and avg_conf >= 40:
+            break
 
-# ── Gemini setup (optional) ────────────────────────────────────────────────────
+    # Pick the attempt with the highest average confidence
+    best = max(attempts, key=lambda a: a["avg_conf"])
+    best_text = best["text"]
+    best_conf = best["avg_conf"]
+    best_words = best["word_count"]
 
-def _gemini_available() -> bool:
-    keys = os.environ.get("GEMINI_API_KEYS", "") or os.environ.get("GEMINI_API_KEY", "")
-    return bool(keys.strip())
+    # Empty/garbled check: if confident word count < 10 or avg confidence < 35,
+    # return empty text so garbage is not cached.
+    if best_words < 10 or best_conf < 35:
+        return "", max(best_conf, 0.0)
 
+    return best_text, max(best_conf, 0.0)
 
-# Minimum chars Tesseract must return before we skip Gemini fallback.
-# If Tesseract returns fewer chars it likely failed on a poor scan.
-TESSERACT_MIN_CHARS = 50
 
 # ── Subject detection (regex, no LLM) ─────────────────────────────────────────
 
@@ -62,7 +185,7 @@ _HEADER_PATTERNS = [
 
 
 def _detect_subject_from_text(text: str, known_subjects: List[str]) -> Optional[str]:
-    """Check if a text page has a new subject header using string matching."""
+    """Return the matching known subject name if one appears in the page text."""
     text_lower = text.lower()
     for subj in known_subjects:
         if subj.lower() in text_lower and len(subj) > 3:
@@ -70,20 +193,10 @@ def _detect_subject_from_text(text: str, known_subjects: List[str]) -> Optional[
     return None
 
 
-def _strip_fences(raw: str) -> str:
-    """Remove markdown code fences the model occasionally adds around JSON."""
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.strip("`")
-        if raw.lower().startswith("json"):
-            raw = raw[4:]
-    return raw.strip()
-
-
-# ── Text-page helper (free, no API) ───────────────────────────────────────────
+# ── Text-page handler (free, no OCR) ──────────────────────────────────────────
 
 def tag_text_page(text: str, known_subjects: List[str], page_num: int) -> dict:
-    """Process a text-extracted page without any API call."""
+    """Process a text-extracted page without any OCR call."""
     subject = _detect_subject_from_text(text, known_subjects)
     return {
         "has_new_subject_header": subject is not None,
@@ -92,229 +205,124 @@ def tag_text_page(text: str, known_subjects: List[str], page_num: int) -> dict:
     }
 
 
-# ── Tesseract OCR (primary for scanned pages) ─────────────────────────────────
+# ── Poor-quality thresholds ───────────────────────────────────────────────────
 
-def tag_vision_page_tesseract(image: Image.Image, known_subjects: List[str], page_num: int) -> dict:
-    """OCR a scanned page using Tesseract. No API quota used."""
-    text = _ocr_with_tesseract(image).strip()
-    subject = _detect_subject_from_text(text, known_subjects)
-    print(f"[ocr_tagger] Page {page_num}: Tesseract → {len(text)} chars extracted.")
-    return {
-        "has_new_subject_header": subject is not None,
-        "subject": subject,
-        "text": text,
-    }
+# If OCR yields fewer than this many characters, the page is considered poorly scanned.
+POOR_CHARS_THRESHOLD = 50
 
-
-# ── Gemini Vision (optional quality-upgrade fallback) ─────────────────────────
-
-GEMINI_SINGLE_PROMPT = """You are reading one page from a scanned university exam paper (PYQ bundle).
-Known subjects (use exact name if header matches): {known_subjects}
-
-Return ONLY valid JSON, no other text, in this exact shape:
-{{"has_new_subject_header": true or false,
-  "subject": "detected subject name, or null if has_new_subject_header is false",
-  "text": "the full extracted text of this page"}}"""
-
-GEMINI_BATCH_PROMPT = """You are reading {n_pages} pages from a scanned university exam paper (PYQ bundle).
-I am sending you {n_pages} page images IN ORDER (page numbers: {page_nums}).
-This bundle may mix multiple subjects; each subject starts on a new page with a header.
-Known subjects (use exact name if header matches): {known_subjects}
-
-For EACH page image (in the exact order sent), extract all text and detect subject headers.
-
-Return ONLY valid JSON, no other text, in this exact shape:
-{{"pages": [
-  {{"page_num": <int>, "has_new_subject_header": <true|false>, "subject": "<name or null>", "text": "<full extracted text of this page>"}},
-  ... one entry per page, in the same order as the images sent ...
-]}}"""
-
-
-def _tag_vision_page_gemini(image: Image.Image, known_subjects: List[str]) -> dict:
-    """Single-page Gemini OCR (fallback for poor Tesseract results)."""
-    import json
-    from services.llm_client import generate_vision
-    prompt = GEMINI_SINGLE_PROMPT.format(
-        known_subjects=", ".join(known_subjects) or "unknown"
-    )
-    raw = generate_vision([prompt, image])
-    return json.loads(_strip_fences(raw))
-
-
-def _tag_vision_batch_gemini(
-    images: List[Image.Image],
-    page_indices: List[int],
-    known_subjects: List[str],
-) -> List[dict]:
-    """Batch Gemini OCR for multiple pages in one API call."""
-    import json
-    from services.llm_client import generate_vision_batch
-    n = len(images)
-    prompt = GEMINI_BATCH_PROMPT.format(
-        n_pages=n,
-        page_nums=", ".join(str(i) for i in page_indices),
-        known_subjects=", ".join(known_subjects) or "unknown",
-    )
-    raw = generate_vision_batch(prompt, images)
-    data = json.loads(_strip_fences(raw))
-    pages = data.get("pages", [])
-    if len(pages) != n:
-        raise ValueError(
-            f"Batch response has {len(pages)} entries but {n} images were sent."
-        )
-    return pages
+# If mean OCR confidence is below this, emit a warning (even if chars are OK).
+POOR_CONF_THRESHOLD = 60
 
 
 # ── Main entry point ───────────────────────────────────────────────────────────
 
-MAX_PAGES_PER_BATCH = 15  # for Gemini batch calls only
-
-
 def tag_and_extract_all(
-    pages: List[Tuple[str, Optional[Image.Image]]],
+    pages: Iterable[Tuple[int, str, Optional[Image.Image]]],
     known_subjects: List[str],
-) -> List[Dict]:
-    """Process all pages of a PDF.
+) -> Tuple[List[Dict], List[str]]:
+    """Process all pages from a lazy iterator, one at a time.
 
-    Pipeline per scanned page:
-      1. Tesseract OCR  (always tried first — free, no quota)
-      2. Gemini Vision  (only if Tesseract returns < TESSERACT_MIN_CHARS AND
-                         Gemini API keys are configured)
+    Args:
+        pages: Iterator of ``(page_num, text, image_or_None)`` from
+               ``pdf_to_images.iter_pages()``.  When image is not None the
+               caller (here) owns it and must ``del`` it after use.
+        known_subjects: List of expected subject names for this PYQ bundle.
 
-    Text-based pages are handled locally with zero API calls.
+    Returns:
+        (results, warnings) where:
+        - results: list of dicts with keys ``page_num``, ``subject``,
+          ``text``, ``ocr_conf`` (float or None).
+        - warnings: list of human-readable strings describing poor pages.
+          Entries prefixed ``TESSERACT_MISSING:`` indicate the binary is absent.
 
-    Returns [{"page_num", "subject", "text"}, ...] with subject forward-filled.
+    Subject is forward-filled: once a page header sets the subject, all
+    subsequent pages inherit it until the next header.
     """
     use_tesseract = _tesseract_available()
-    use_gemini = _gemini_available()
 
     if use_tesseract:
         print("[ocr_tagger] Tesseract available — using as primary OCR engine.")
     else:
-        print("[ocr_tagger] WARNING: Tesseract not found. Install tesseract-ocr.")
+        print("[ocr_tagger] WARNING: Tesseract not found. Scanned pages will be empty.")
 
-    if use_gemini:
-        print("[ocr_tagger] Gemini keys found — will use as fallback for poor Tesseract results.")
-    else:
-        print("[ocr_tagger] No Gemini keys — Tesseract only.")
+    results: List[Dict] = []
+    warnings: List[str] = []
+    current_subject: Optional[str] = None
+    scanned_page_count = 0
+    tesseract_missing_warned = False
 
-    # ── Step 1: Process text pages locally; collect image pages ───────────────
-    text_page_results: Dict[int, dict] = {}
-    image_page_queue: List[Tuple[int, Image.Image]] = []
-
-    for i, (text, image) in enumerate(pages, start=1):
+    for page_num, text, image in pages:
         if image is None:
-            parsed = tag_text_page(text, known_subjects, i)
-            text_page_results[i] = parsed
-            print(f"[ocr_tagger] Page {i}: text extraction (no OCR needed)")
+            # ── Text-based page: subject detection only, no OCR ──────────────
+            parsed = tag_text_page(text, known_subjects, page_num)
+            ocr_conf = None
+            print(f"[ocr_tagger] Page {page_num}: text extraction ({len(text)} chars)")
         else:
-            image_page_queue.append((i, image))
+            # ── Scanned page: preprocess → OCR ───────────────────────────────
+            scanned_page_count += 1
 
-    print(
-        f"[ocr_tagger] {len(text_page_results)} text page(s) free. "
-        f"{len(image_page_queue)} scanned page(s) need OCR."
-    )
-
-    # ── Step 2: OCR all scanned pages ─────────────────────────────────────────
-    image_page_results: Dict[int, dict] = {}
-
-    # Pages that Tesseract couldn't read well — candidates for Gemini upgrade
-    gemini_upgrade_queue: List[Tuple[int, Image.Image]] = []
-
-    for page_num, img in image_page_queue:
-        if use_tesseract:
-            try:
-                parsed = tag_vision_page_tesseract(img, known_subjects, page_num)
-                parsed["page_num"] = page_num
-                image_page_results[page_num] = parsed
-
-                # Queue for Gemini upgrade if text is suspiciously short
-                if len(parsed["text"]) < TESSERACT_MIN_CHARS and use_gemini:
-                    print(
-                        f"[ocr_tagger] Page {page_num}: Tesseract returned only "
-                        f"{len(parsed['text'])} chars — queuing for Gemini upgrade."
+            if not use_tesseract:
+                if not tesseract_missing_warned:
+                    warnings.append(
+                        "TESSERACT_MISSING: Tesseract OCR binary is not installed. "
+                        "Scanned pages cannot be read. Digital-text PDFs still work normally."
                     )
-                    gemini_upgrade_queue.append((page_num, img))
-
-            except Exception as tess_err:
-                print(f"[ocr_tagger] Page {page_num}: Tesseract failed ({tess_err}).")
-                image_page_results[page_num] = {
-                    "page_num": page_num,
-                    "has_new_subject_header": False,
-                    "subject": None,
-                    "text": "",
-                }
-                if use_gemini:
-                    gemini_upgrade_queue.append((page_num, img))
-        else:
-            # No Tesseract — go straight to Gemini if available
-            if use_gemini:
-                gemini_upgrade_queue.append((page_num, img))
+                    tesseract_missing_warned = True
+                # Produce an empty result for this page so we don't break the
+                # page-count loop; digital pages will still be stored correctly.
+                parsed = {"has_new_subject_header": False, "subject": None, "text": ""}
+                ocr_conf = None
+                del image  # free memory even on the error path
             else:
-                image_page_results[page_num] = {
-                    "page_num": page_num,
-                    "has_new_subject_header": False,
-                    "subject": None,
-                    "text": "",
-                }
-                print(f"[ocr_tagger] Page {page_num}: no OCR engine available — empty text.")
+                try:
+                    preprocessed = preprocess(image)
+                    del image  # free original immediately; preprocessed is small
+                    raw_text, mean_conf = ocr_page(preprocessed)
+                    del preprocessed  # free after OCR
 
-    # ── Step 3: Gemini upgrade for pages Tesseract struggled with ─────────────
-    if gemini_upgrade_queue:
-        print(
-            f"[ocr_tagger] Sending {len(gemini_upgrade_queue)} page(s) to Gemini "
-            f"for quality upgrade (in batches of {MAX_PAGES_PER_BATCH})."
-        )
-        chunks = [
-            gemini_upgrade_queue[s: s + MAX_PAGES_PER_BATCH]
-            for s in range(0, len(gemini_upgrade_queue), MAX_PAGES_PER_BATCH)
-        ]
-        for chunk_idx, chunk in enumerate(chunks, start=1):
-            chunk_indices = [p for p, _ in chunk]
-            chunk_images = [img for _, img in chunk]
-            try:
-                batch_results = _tag_vision_batch_gemini(chunk_images, chunk_indices, known_subjects)
-                for r in batch_results:
-                    pn = r["page_num"]
-                    if len(r.get("text", "")) > len(image_page_results.get(pn, {}).get("text", "")):
-                        image_page_results[pn] = r
-                        print(f"[ocr_tagger] Page {pn}: Gemini upgrade applied ✓")
+                    ocr_conf = round(mean_conf, 2)
+                    char_count = len(raw_text.strip())
+
+                    print(
+                        f"[ocr_tagger] Page {page_num}: "
+                        f"{char_count} chars, conf={mean_conf:.0f}"
+                    )
+
+                    if not raw_text or not raw_text.strip():
+                        warnings.append(f"Page {page_num} could not be read clearly by OCR")
+                        parsed = {"has_new_subject_header": False, "subject": None, "text": ""}
+                        parsed["ocr_conf"] = ocr_conf
                     else:
-                        print(f"[ocr_tagger] Page {pn}: Tesseract result kept (Gemini not better).")
-            except Exception as gem_err:
-                print(f"[ocr_tagger] Gemini batch {chunk_idx} failed ({gem_err}) — keeping Tesseract results.")
-                # Per-page fallback
-                for page_num, img in chunk:
-                    try:
-                        r = _tag_vision_page_gemini(img, known_subjects)
-                        r["page_num"] = page_num
-                        if len(r.get("text", "")) > len(image_page_results.get(page_num, {}).get("text", "")):
-                            image_page_results[page_num] = r
-                    except Exception as e:
-                        print(f"[ocr_tagger] Page {page_num}: Gemini per-page also failed ({e}) — keeping Tesseract.")
+                        if mean_conf < POOR_CONF_THRESHOLD:
+                            warnings.append(
+                                f"Page {page_num}: low OCR confidence "
+                                f"({mean_conf:.0f} % — some text may be inaccurate)"
+                            )
+                        parsed = tag_text_page(raw_text, known_subjects, page_num)
+                        parsed["ocr_conf"] = ocr_conf
 
-    # ── Step 4: Merge results in page order with subject forward-fill ──────────
-    results = []
-    current_subject = None
+                except Exception as tess_err:
+                    print(f"[ocr_tagger] Page {page_num}: Tesseract error — {tess_err}")
+                    warnings.append(
+                        f"Page {page_num}: OCR failed ({type(tess_err).__name__})"
+                    )
+                    parsed = {"has_new_subject_header": False, "subject": None, "text": ""}
+                    ocr_conf = None
 
-    for i in range(1, len(pages) + 1):
-        parsed = text_page_results.get(i) or image_page_results.get(i, {})
-
+        # ── Subject forward-fill ─────────────────────────────────────────────
         if parsed.get("has_new_subject_header") and parsed.get("subject"):
             current_subject = parsed["subject"]
 
         results.append({
-            "page_num": i,
+            "page_num": page_num,
             "subject": current_subject or "Unknown",
             "text": parsed.get("text", ""),
+            "ocr_conf": parsed.get("ocr_conf", ocr_conf),
         })
 
-    total_ocr = len(image_page_queue)
-    tess_count = total_ocr - len(gemini_upgrade_queue)
+    text_count = len(results) - scanned_page_count
     print(
-        f"[ocr_tagger] Done: {len(pages)} pages total. "
-        f"{len(text_page_results)} text (free), "
-        f"{tess_count} Tesseract OCR, "
-        f"{len(gemini_upgrade_queue)} Gemini upgrade attempted."
+        f"[ocr_tagger] Done: {len(results)} pages total — "
+        f"{text_count} text (free), {scanned_page_count} Tesseract OCR."
     )
-    return results
+    return results, warnings

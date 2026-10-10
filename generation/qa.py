@@ -8,6 +8,7 @@ Two-path Q&A routing for Campus Brain:
    stale or hallucinated) intrinsic knowledge.
    Falls back to pure-LLM intrinsic knowledge if Tavily is unavailable or
    returns no results — so behaviour degrades gracefully, never breaks.
+   Classifies scope into [[SCOPE: exam]] or [[SCOPE: general]].
 
 2. answer_question() — paper-grounded questions ("Which topics are in section A?"):
    Injects the full extracted exam paper text into the prompt so the model
@@ -17,8 +18,30 @@ Two-path Q&A routing for Campus Brain:
 The router (router/intent_router.py) decides which path to call based on
 keyword matching on the student's free-text input.
 """
-from services.llm_client import generate_text
+from __future__ import annotations
+
+import re
+from typing import Optional, Tuple
+
+from services.llm_client import generate_text, LLMUnavailableError
 from services.web_search import search_web
+
+_BUSY_MSG = (
+    "⚠️ **The AI is busy or rate-limited.** Please try again in a minute. "
+    "If this keeps happening, check that your `GROQ_API_KEY` is valid."
+)
+
+_SCOPE_PATTERN = re.compile(r"\[\[SCOPE:\s*(exam|general)\]\]\s*", re.IGNORECASE)
+
+
+def split_scope(text: str) -> Tuple[str, Optional[str]]:
+    """Extract scope ('exam' or 'general') from text and return (clean_text, scope)."""
+    match = _SCOPE_PATTERN.search(text)
+    if match:
+        scope = match.group(1).lower()
+        clean_text = _SCOPE_PATTERN.sub("", text, count=1).strip()
+        return clean_text, scope
+    return text.strip(), None
 
 
 # ── Path 1a: Web-augmented knowledge answer ───────────────────────────────────
@@ -31,6 +54,7 @@ These sources are current and authoritative — prefer them over your training d
 {sources_block}
 
 Rules:
+- Begin your reply with exactly [[SCOPE: exam]] if the question relates to the subject, syllabus or exam preparation, otherwise [[SCOPE: general]]. Then answer normally.
 - Write at least 300 words. Never give a short one-paragraph reply.
 - Structure your answer clearly:
     • Start with a crisp 1-2 sentence definition or direct answer.
@@ -52,6 +76,7 @@ A student is preparing for their exam and has asked you the following question.
 Answer it comprehensively from your own academic knowledge.
 
 Rules:
+- Begin your reply with exactly [[SCOPE: exam]] if the question relates to the subject, syllabus or exam preparation, otherwise [[SCOPE: general]]. Then answer normally.
 - Write at least 300 words. Never give a short one-paragraph reply.
 - Structure your answer clearly:
     • Start with a crisp 1-2 sentence definition.
@@ -83,7 +108,7 @@ def _build_sources_block(results: list) -> str:
     return "\n\n".join(lines)
 
 
-def knowledge_answer(question: str) -> str:
+def knowledge_answer(question: str) -> Tuple[str, Optional[str]]:
     """Answer a concept/theory/math/code question.
 
     Flow:
@@ -92,7 +117,8 @@ def knowledge_answer(question: str) -> str:
     3. If no results (key missing, quota, niche query) → fall back to pure-LLM
        intrinsic knowledge prompt (original behaviour, zero regression).
 
-    Temperature 0.4 — richer prose than factual QA (0.2) but still accurate.
+    Returns:
+        (clean_answer, scope) where scope is 'exam', 'general', or None.
     """
     results = search_web(question, max_results=3)
 
@@ -107,7 +133,11 @@ def knowledge_answer(question: str) -> str:
         prompt = _INTRINSIC_KNOWLEDGE_PROMPT.format(question=question)
         print("[qa] No Tavily results — using intrinsic LLM knowledge.")
 
-    return generate_text(prompt, temperature=0.4)
+    try:
+        raw_text = generate_text(prompt, temperature=0.4)
+        return split_scope(raw_text)
+    except LLMUnavailableError:
+        return _BUSY_MSG, None
 
 
 # ── Path 2: Paper-grounded answer ─────────────────────────────────────────────
@@ -132,5 +162,7 @@ def answer_question(paper_text: str, question: str) -> str:
     rephrase what the paper text says, not improvise extra detail.
     """
     prompt = PAPER_QA_PROMPT.format(paper_text=paper_text, question=question)
-    return generate_text(prompt, temperature=0.2)
-
+    try:
+        return generate_text(prompt, temperature=0.2)
+    except LLMUnavailableError:
+        return _BUSY_MSG

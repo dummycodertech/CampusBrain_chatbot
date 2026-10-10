@@ -56,7 +56,7 @@ TOPIC_KEYWORDS = {
 }
 
 
-def _split_into_questions(text: str) -> list:
+def split_into_questions(text: str) -> list:
     """Split paper text into individual question chunks."""
     # Match Q1, Q.1, 1., 1), a), a., (a), (1) etc.
     pattern = re.compile(
@@ -74,8 +74,10 @@ def _split_into_questions(text: str) -> list:
         chunks.append(text[start:end].strip())
     return chunks
 
+_split_into_questions = split_into_questions
 
-def _score_question(question_text: str) -> dict:
+
+def score_question(question_text: str) -> dict:
     """Return {topic: score} for a single question based on keyword hits."""
     lower = question_text.lower()
     scores = {}
@@ -84,6 +86,23 @@ def _score_question(question_text: str) -> dict:
         if hits > 0:
             scores[topic] = hits
     return scores
+
+_score_question = score_question
+
+
+def extract_marks(text: str) -> int:
+    """Extract question marks from text, handling [10], (10), [10M], (10 marks), '10 Marks'."""
+    # 1. Prefer explicit marks/M notation: [10M], (10 marks), 10 Marks, [10 Marks]
+    for m in re.finditer(r"(?:\[|\()?\s*(\d{1,2})\s*(?:marks?|m)\s*(?:\]|\)?|\b)", text, re.IGNORECASE):
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
+    # 2. Look for bracketed numbers: [10], (10)
+    brackets = list(re.finditer(r"[\[\(]\s*(\d{1,2})\s*[\]\)]", text))
+    if brackets:
+        return int(brackets[-1].group(1))
+    return 0
 
 
 def generate_topic_heatmap(paper_text: str, cached_summary: str = "") -> dict:
@@ -95,26 +114,22 @@ def generate_topic_heatmap(paper_text: str, cached_summary: str = "") -> dict:
     if not paper_text or len(paper_text.strip()) < 80:
         raise ValueError("Not enough text to analyse topics.")
 
-    questions = _split_into_questions(paper_text)
+    questions = split_into_questions(paper_text)
     if not questions:
         raise ValueError("Could not detect individual questions in this paper.")
 
     topic_counts = defaultdict(int)
     topic_marks = defaultdict(int)
 
-    # Look for mark annotations: (5 marks), [10M], 5 marks, etc.
-    marks_pattern = re.compile(r"\[?(\d+)\s*(?:marks?|M)\]?", re.IGNORECASE)
-
     for q in questions:
-        scores = _score_question(q)
+        scores = score_question(q)
         if not scores:
             continue
         best_topic = max(scores, key=scores.get)
         topic_counts[best_topic] += 1
-        # Try to extract marks from this question
-        m = marks_pattern.search(q)
-        if m:
-            topic_marks[best_topic] += int(m.group(1))
+        m = extract_marks(q)
+        if m > 0:
+            topic_marks[best_topic] += m
 
     if not topic_counts:
         # Fallback: count keyword frequency across the whole text

@@ -1,250 +1,107 @@
 """
-Thin wrappers around the two LLM providers used by Campus Brain:
+Thin wrappers around the Groq LLM provider used by Campus Brain.
 
-- Gemini (gemini-2.5-flash) for OCR + subject-boundary detection on scanned
-  PDF pages.  Chosen over Tesseract because it handles messy scans,
-  multi-column layouts, and math notation far better out of the box.
-  Uses the new google-genai SDK (google.generativeai is deprecated).
-  Multiple API keys are supported via GEMINI_API_KEYS (comma-separated);
-  the client rotates keys on per-minute rate limits and permanently skips
-  keys that have hit daily quotas.
+All text generation (Q&A, summaries, quizzes,
+topic ranking, flashcards) goes through Groq only.
 
-- Groq (openai/gpt-oss-120b) for all text generation: Q&A, summaries,
-  quizzes, topic ranking.  This is Groq's current recommended replacement
-  for the decommissioned llama-3.3-70b-versatile model (retired Aug 2026).
-
-Provider selection rationale
------------------------------
-  Vision  → Gemini 2.5 Flash  (multimodal, free tier, best OCR quality)
-  Text    → Groq openai/gpt-oss-120b (fast, replaces retired llama-3.3-70b)
+Provider:
+  Text → Groq openai/gpt-oss-120b (fast inference, free tier)
+         with fallback chain → gpt-oss-20b → configurable via GROQ_MODEL_CHAIN
 """
+import functools
 import os
-import time
-from google import genai
-from google.genai import errors as genai_errors
+import threading
 from groq import Groq
 
-_gemini_clients = []
-_current_client_idx = 0
-_exhausted_keys = set()   # indices of keys that hit daily/permanent limits
-_loaded_keys_str = ""    # tracks which key string was last loaded (to detect changes)
-# Only gemini-2.5-flash is confirmed working on free tier (campus brain dashboard shows 1/20 RPD)
-# gemini-2.0-flash → limit=0 (blocked), gemini-2.0-flash-lite → also blocked, gemini-1.5-flash → 404
-VISION_MODEL = "gemini-2.5-flash"
-VISION_MODEL_FALLBACK = "gemini-2.5-flash-lite"  # lighter variant, separate quota pool
 
-
-def _init_gemini_clients():
-    """(Re-)initialize Gemini clients from the current environment.
-
-    Called on every API attempt so that newly added keys (added to .env /
-    Streamlit secrets and the app restarted) are picked up immediately.
-    If the key string has changed since the last load, the client list and
-    exhausted-key set are fully reset.
+class LLMUnavailableError(Exception):
+    """Raised when every model in the Groq fallback chain fails or returns
+    empty content.  Callers should catch this and show a friendly UI message
+    rather than displaying a blank response.
     """
-    global _gemini_clients, _current_client_idx, _exhausted_keys, _loaded_keys_str
-    keys_str = os.environ.get("GEMINI_API_KEYS", "") or os.environ.get("GEMINI_API_KEY", "")
-    keys = [k.strip() for k in keys_str.split(",") if k.strip()]
-
-    if not keys:
-        raise ValueError("No Gemini API keys found in environment.")
-
-    # Only rebuild if keys have actually changed (avoids re-creating clients on every call)
-    if keys_str != _loaded_keys_str:
-        _gemini_clients = [genai.Client(api_key=k) for k in keys]
-        _loaded_keys_str = keys_str
-        _exhausted_keys = set()   # reset exhausted set — new keys deserve a fresh start
-        _current_client_idx = 0
-        print(f"[llm_client] (Re)loaded {len(_gemini_clients)} Gemini API key(s).")
 
 
-def reset_gemini_clients():
-    """Force a full reload of Gemini clients on next call (e.g. after env change)."""
-    global _loaded_keys_str, _exhausted_keys
-    _loaded_keys_str = ""
-    _exhausted_keys = set()
-    print("[llm_client] Gemini client cache cleared — will reload on next call.")
+# Default Groq model chain (primary → fallbacks). Override via env:
+#   GROQ_MODEL_CHAIN=openai/gpt-oss-120b,openai/gpt-oss-20b
+_DEFAULT_MODEL_CHAIN = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+]
+
+# ── Groq rate limit tracking ──────────────────────────────────────────────────
+_rate_info_lock = threading.Lock()
+_rate_info: dict = {}
+_printed_headers: bool = False
+
+_TRACKED_HEADERS = [
+    "x-ratelimit-limit-requests",
+    "x-ratelimit-remaining-requests",
+    "x-ratelimit-reset-requests",
+    "x-ratelimit-limit-tokens",
+    "x-ratelimit-remaining-tokens",
+    "x-ratelimit-reset-tokens",
+]
 
 
-def get_current_gemini_client() -> genai.Client:
-    _init_gemini_clients()
-    return _gemini_clients[_current_client_idx]
+def _update_rate_info(headers) -> None:
+    """Save Groq rate limit headers into module state thread-safely."""
+    global _printed_headers
+    if not headers:
+        return
+    headers_dict = {str(k).lower(): str(v) for k, v in headers.items()}
+
+    if not _printed_headers:
+        ratelimit_keys = [k for k in headers_dict.keys() if "ratelimit" in k]
+        print(f"[llm_client] Groq rate limit headers received: {ratelimit_keys}")
+        _printed_headers = True
+
+    with _rate_info_lock:
+        for key in _TRACKED_HEADERS:
+            if key in headers_dict:
+                _rate_info[key] = headers_dict[key]
 
 
-def rotate_gemini_client():
-    """Advance to the next non-exhausted key. Wraps around the key list."""
-    global _current_client_idx
-    _init_gemini_clients()
-    num_keys = len(_gemini_clients)
-    for _ in range(num_keys):
-        _current_client_idx = (_current_client_idx + 1) % num_keys
-        if _current_client_idx not in _exhausted_keys:
-            break
-    print(f"[llm_client] Switched to Gemini API key #{_current_client_idx + 1} of {num_keys}")
-
-def get_num_keys() -> int:
-    _init_gemini_clients()
-    return len(_gemini_clients)
+def get_rate_info() -> dict:
+    """Return a snapshot of the latest Groq rate limit headers."""
+    with _rate_info_lock:
+        return dict(_rate_info)
 
 
-def _parse_retry_delay(e: genai_errors.ClientError) -> float:
-    """Extract the retryDelay seconds advertised in the API error details.
+@functools.lru_cache(maxsize=1)
+def _get_active_model_chain() -> list:
+    """Return the validated list of Groq model IDs to try in order.
 
-    The Gemini API embeds a 'retryDelay' field (e.g. '54s') in the error
-    details array when it returns 429 RESOURCE_EXHAUSTED.  We honour this
-    instead of using a fixed back-off so we wait exactly as long as the API
-    tells us to.  Falls back to 5 seconds if the field is absent.
+    1. Reads GROQ_MODEL_CHAIN from env (comma-separated) or falls back to
+       _DEFAULT_MODEL_CHAIN.
+    2. Calls client.models.list() once (cached) to prune IDs that don't exist
+       on this Groq account.  If the list call fails for any reason the
+       configured chain is kept as-is so behaviour degrades gracefully.
+    3. Logs which models are active so it's visible in Streamlit Cloud logs.
     """
+    env_chain = os.environ.get("GROQ_MODEL_CHAIN", "").strip()
+    if env_chain:
+        configured = [m.strip() for m in env_chain.split(",") if m.strip()]
+    else:
+        configured = list(_DEFAULT_MODEL_CHAIN)
+
     try:
-        details = e.details if hasattr(e, "details") else []
-        if isinstance(details, dict):
-            details = details.get("error", {}).get("details", [])
-        for item in (details or []):
-            if isinstance(item, dict) and "retryDelay" in item:
-                delay_str = item["retryDelay"]  # e.g. "54s"
-                return float(delay_str.rstrip("s"))
-    except Exception:
-        pass
-    return 5.0
+        client = Groq(api_key=os.environ["GROQ_API_KEY"])
+        available_ids = {m.id for m in client.models.list().data}
+        active = [m for m in configured if m in available_ids]
+        pruned = [m for m in configured if m not in available_ids]
+        if pruned:
+            print(f"[llm_client] Models not found on this Groq account (pruned): {pruned}")
+        if not active:
+            print("[llm_client] WARNING: no configured models were found via models.list(); "
+                  "keeping full chain as fallback.")
+            active = configured
+    except Exception as e:
+        print(f"[llm_client] Could not validate model list ({type(e).__name__}: {e}); "
+              f"keeping configured chain.")
+        active = configured
 
-
-def _is_daily_exhausted(e: genai_errors.ClientError) -> bool:
-    """Return True if this 429 is a daily quota violation (not just per-minute RPM)."""
-    try:
-        details = e.details if hasattr(e, "details") else []
-        if isinstance(details, dict):
-            details = details.get("error", {}).get("details", [])
-        for item in (details or []):
-            violations = item.get("violations", []) if isinstance(item, dict) else []
-            for v in violations:
-                if "PerDay" in v.get("quotaId", ""):
-                    return True
-    except Exception:
-        pass
-    return False
-
-
-def generate_vision(contents: list, model: str = VISION_MODEL) -> str:
-    """Send a multimodal prompt (text + image) to Gemini and return the text response.
-
-    On 429 RESOURCE_EXHAUSTED:
-    - Per-minute limit: waits the retry delay then tries the next key.
-    - Daily limit: marks the key as permanently exhausted and skips it.
-    Tries every available key, then falls back to gemini-1.5-flash (separate quota).
-    """
-    global _current_client_idx
-    _init_gemini_clients()
-
-    # Try primary model first, then fallback — each has its own separate quota pool
-    models_to_try = [model]
-    if model != VISION_MODEL_FALLBACK:
-        models_to_try.append(VISION_MODEL_FALLBACK)
-
-    last_exception = None
-
-    for current_model in models_to_try:
-        if current_model != model:
-            print(f"[llm_client] Falling back to {current_model} (separate quota pool)...")
-            # Reset exhausted keys for the new model — new quota pool
-            _exhausted_keys.clear()
-
-        num_keys = len(_gemini_clients)
-
-        for attempt in range(num_keys):
-            idx = (_current_client_idx + attempt) % num_keys
-            if idx in _exhausted_keys:
-                print(f"[llm_client] Skipping key #{idx + 1} (daily quota exhausted for {current_model}).")
-                continue
-
-            client = _gemini_clients[idx]
-            try:
-                response = client.models.generate_content(model=current_model, contents=contents)
-                _current_client_idx = idx
-                return response.text
-
-            except genai_errors.APIError as e:
-                # Log the FULL error so we can diagnose in Streamlit Cloud logs
-                code = getattr(e, "code", None)
-                status = getattr(e, "status", None)
-                msg = str(e)
-                print(
-                    f"[llm_client] Key #{idx + 1} / {current_model} → "
-                    f"code={code} status={status} msg={msg!r}"
-                )
-
-                is_rate_limit = (
-                    code == 429
-                    or str(code) == "429"
-                    or status == "RESOURCE_EXHAUSTED"
-                )
-                try:
-                    is_server_error = code is not None and int(code) >= 500
-                except (TypeError, ValueError):
-                    is_server_error = False
-                is_not_found = code == 404
-
-                if is_not_found:
-                    print(f"[llm_client] Model {current_model} returned 404 — skipping all keys for this model.")
-                    break
-
-                if is_rate_limit or is_server_error:
-                    last_exception = e
-                    daily = _is_daily_exhausted(e)
-                    delay = _parse_retry_delay(e)
-
-                    if daily:
-                        _exhausted_keys.add(idx)
-                        print(
-                            f"[llm_client] Key #{idx + 1} daily quota exhausted for {current_model}. "
-                            f"({len(_exhausted_keys)}/{num_keys} keys dead)"
-                        )
-                    else:
-                        print(
-                            f"[llm_client] Key #{idx + 1} per-minute limit on {current_model}. "
-                            f"Waiting {delay:.0f}s..."
-                        )
-                        time.sleep(min(delay, 10))
-                else:
-                    # Unexpected error (e.g. 401 invalid key, 403 forbidden)
-                    # — re-raise so it surfaces in the UI error message
-                    print(f"[llm_client] Unexpected/auth error (code={code}) — re-raising: {msg!r}")
-                    raise
-
-            except Exception as e:
-                print(f"[llm_client] Non-API exception: {type(e).__name__}: {e}")
-                raise
-
-
-        print(f"[llm_client] All keys exhausted for {current_model}.")
-
-    print("[llm_client] All models and keys exhausted.")
-    if last_exception:
-        raise last_exception
-    raise RuntimeError("Failed to generate vision content: all API keys and models are rate-limited.")
-
-
-def generate_vision_batch(prompt: str, images: list, model: str = VISION_MODEL) -> str:
-    """Send ONE multimodal request containing a prompt + multiple page images.
-
-    This is the key to quota efficiency: instead of 1 API call per scanned page,
-    callers can send all pages of a PDF in a single request.
-
-    contents = [prompt_text, image_1, image_2, ..., image_N]
-
-    All retry / key-rotation logic is inherited from generate_vision().
-    Gemini 2.5 Flash supports up to 3,600 image frames per request so even a
-    100-page PDF fits within one call.
-
-    Args:
-        prompt: Instruction text telling the model what to extract from the images.
-        images: List of PIL Image objects, in page order.
-        model:  Vision model to use (default: VISION_MODEL = gemini-2.5-flash).
-
-    Returns:
-        Raw text response from the model (caller must parse JSON etc.).
-    """
-    contents = [prompt] + images
-    return generate_vision(contents, model=model)
+    print(f"[llm_client] Active Groq model chain: {active}")
+    return active
 
 
 def get_groq_client() -> Groq:
@@ -260,36 +117,64 @@ def generate_text(
 ) -> str:
     """Send a text prompt to Groq and return the completion string.
 
-    Tries the requested model first. If it returns None/empty content (which
-    Groq does silently when the model is overloaded or rate-limited at the
-    infrastructure level), automatically falls back through a model chain.
-    Temperature defaults to 0.2 for factual/retrieval tasks.
+    Tries the requested model first, then every model in the active chain
+    returned by _get_active_model_chain().  If every attempt fails or returns
+    empty content, raises LLMUnavailableError so callers can show a friendly
+    message instead of a blank UI.
+
+    Captures Groq rate-limit headers via `with_raw_response` and enforces per-session
+    prompt limits from MAX_PROMPTS_PER_SESSION.
     """
-    # Fallback chain using only models confirmed available on this Groq account:
-    # openai/gpt-oss-120b → openai/gpt-oss-20b → qwen/qwen3.8-27b
-    model_chain = [model]
-    for fb in ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"]:
-        if fb not in model_chain:
-            model_chain.append(fb)
+    # ── Per-session prompt limit guard ────────────────────────────────────────
+    try:
+        from streamlit.runtime import exists as _st_runtime_exists
+        if _st_runtime_exists():
+            import streamlit as st
+            if "prompts_used" not in st.session_state:
+                st.session_state.prompts_used = 0
+            max_prompts = int(os.environ.get("MAX_PROMPTS_PER_SESSION", 25))
+            if st.session_state.prompts_used >= max_prompts:
+                msg = f"You have reached your session limit of {max_prompts} prompts. Please refresh the page to start a new session."
+                st.warning(f"⚠️ {msg}")
+                return msg
+            st.session_state.prompts_used += 1
+    except Exception:
+        pass
+
+    # Build chain: requested model first, then the rest of the active chain.
+    active_chain = _get_active_model_chain()
+    model_chain = [model] + [m for m in active_chain if m != model]
 
     client = get_groq_client()
     for attempt_model in model_chain:
         try:
-            response = client.chat.completions.create(
+            raw_response = client.chat.completions.with_raw_response.create(
                 model=attempt_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
+            # Capture rate-limit headers
+            _update_rate_info(raw_response.headers)
+            response = raw_response.parse()
             content = response.choices[0].message.content
             finish_reason = response.choices[0].finish_reason
             if content:
                 if attempt_model != model:
                     print(f"[generate_text] Used fallback model {attempt_model} (primary returned empty)")
                 return content
-            # content is None or empty
-            print(f"[generate_text] {attempt_model} returned empty content, finish_reason={finish_reason} — trying next model")
+            # content is None or empty — try next
+            print(
+                f"[generate_text] {attempt_model} returned empty content, "
+                f"finish_reason={finish_reason} — trying next model"
+            )
         except Exception as e:
+            resp = getattr(e, "response", None)
+            if resp is not None and hasattr(resp, "headers"):
+                _update_rate_info(resp.headers)
             print(f"[generate_text] {attempt_model} raised {type(e).__name__}: {e} — trying next model")
 
-    return ""
+    raise LLMUnavailableError(
+        "All Groq models in the chain failed or returned empty content. "
+        f"Chain tried: {model_chain}"
+    )

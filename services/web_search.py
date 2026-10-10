@@ -19,6 +19,8 @@ Failure modes — all silently return [] so the caller falls back gracefully:
 import os
 from typing import List, Dict
 
+from storage.cache_store import CacheStore
+
 
 def search_web(query: str, max_results: int = 3) -> List[Dict]:
     """Search the web via Tavily and return the top results as plain dicts.
@@ -34,6 +36,15 @@ def search_web(query: str, max_results: int = 3) -> List[Dict]:
       - The search call raises any exception (network, quota, etc.)
     This ensures callers always get a safe fallback.
     """
+    if not query or not query.strip():
+        return []
+
+    store = CacheStore()
+    cached = store.get_web(query)
+    if cached is not None:
+        print(f"[web_search] Cache hit for: {query!r}")
+        return cached
+
     api_key = os.environ.get("TAVILY_API_KEY", "").strip()
     if not api_key:
         print("[web_search] TAVILY_API_KEY not set — skipping web search.")
@@ -42,16 +53,17 @@ def search_web(query: str, max_results: int = 3) -> List[Dict]:
     try:
         from tavily import TavilyClient  # imported lazily so missing package doesn't crash startup
         client = TavilyClient(api_key=api_key)
+        depth = os.environ.get("TAVILY_DEPTH", "basic").strip() or "basic"
         response = client.search(
             query=query,
-            search_depth="advanced",   # full page content, not just snippets
+            search_depth=depth,
             max_results=max_results,
             include_answer=True,       # Tavily's own extractive summary
             include_raw_content=False, # we don't need raw HTML
         )
         results = response.get("results", [])
         print(f"[web_search] Tavily returned {len(results)} result(s) for: {query!r}")
-        return [
+        formatted = [
             {
                 "title":   r.get("title", ""),
                 "url":     r.get("url", ""),
@@ -61,6 +73,9 @@ def search_web(query: str, max_results: int = 3) -> List[Dict]:
             for r in results
             if r.get("content")  # skip results with no extracted text
         ]
+        if formatted:
+            store.save_web(query, formatted)
+        return formatted
 
     except ImportError:
         print("[web_search] tavily-python not installed — skipping web search.")

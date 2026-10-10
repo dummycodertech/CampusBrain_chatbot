@@ -5,9 +5,12 @@ Ingestion writes here once per paper. Every query-time lookup reads from
 here only -- nothing ever re-OCRs a page that's already cached.
 """
 from __future__ import annotations
+import json
+import re
 import sqlite3
+import time
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Any
 
 DB_PATH = Path(__file__).parent / "cache.db"
 
@@ -34,14 +37,58 @@ class CacheStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS generated_outputs (
+                    paper_id TEXT,
+                    kind TEXT,
+                    input_hash TEXT,
+                    content TEXT,
+                    created_at REAL,
+                    PRIMARY KEY(paper_id, kind, input_hash)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS web_cache (
+                    query_norm TEXT PRIMARY KEY,
+                    content TEXT,
+                    created_at REAL
+                )
+                """
+            )
+            # Guarded migration: add ocr_conf column if it was added after the
+            # table was first created (old deployments won't have it).
+            existing_cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(pages)")
+            }
+            if "ocr_conf" not in existing_cols:
+                conn.execute("ALTER TABLE pages ADD COLUMN ocr_conf REAL")
+                print("[cache_store] Migrated pages table: added ocr_conf column.")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_subject ON pages(subject)")
             conn.commit()
 
-    def save_page(self, paper_id: str, page_num: int, subject: str, year: str, text: str) -> None:
+    def save_page(
+        self,
+        paper_id: str,
+        page_num: int,
+        subject: str,
+        year: str,
+        text: str,
+        ocr_conf: Optional[float] = None,
+    ) -> None:
+        """Persist one page.  Silently skips pages with empty text so we never
+        cache garbage OCR output that would pollute downstream retrieval."""
+        if not text or not text.strip():
+            return  # never cache empty pages
         with self._connect() as conn:
             conn.execute(
-                """INSERT OR REPLACE INTO pages (paper_id, page_num, subject, year, text)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (paper_id, page_num, subject, year, text),
+                """INSERT OR REPLACE INTO pages
+                   (paper_id, page_num, subject, year, text, ocr_conf)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (paper_id, page_num, subject, year, text, ocr_conf),
             )
             conn.commit()
 
@@ -81,3 +128,114 @@ class CacheStore:
             if text:
                 results.append((year, text))
         return results
+
+    def get_subject_papers(self, subject: str) -> List[Tuple[str, str, str]]:
+        """Return [(paper_id, year, text_of_only_pages_tagged_with_subject)] ordered by page_num.
+
+        If a paper's year is empty or 'Uploaded', detects it from the first page text
+        with r'20\\d{2}'; keeps 'Uploaded' if none found.
+        """
+        with self._connect() as conn:
+            paper_rows = conn.execute(
+                "SELECT DISTINCT paper_id, year FROM pages WHERE LOWER(subject) = LOWER(?) ORDER BY paper_id",
+                (subject,),
+            ).fetchall()
+
+            results = []
+            for paper_id, stored_year in paper_rows:
+                page_rows = conn.execute(
+                    """SELECT page_num, text FROM pages
+                       WHERE paper_id = ? AND LOWER(subject) = LOWER(?) AND TRIM(text) != ''
+                       ORDER BY page_num""",
+                    (paper_id, subject),
+                ).fetchall()
+
+                if not page_rows:
+                    continue
+
+                tagged_text = "\n\n".join(r[1] for r in page_rows)
+
+                # Year detection: if empty or 'Uploaded', detect from first page text
+                year = (stored_year or "").strip()
+                if not year or year.lower() == "uploaded":
+                    first_page_row = conn.execute(
+                        "SELECT text FROM pages WHERE paper_id = ? ORDER BY page_num LIMIT 1",
+                        (paper_id,),
+                    ).fetchone()
+                    first_text = first_page_row[0] if first_page_row else page_rows[0][1]
+                    m = re.search(r"20\d{2}", first_text)
+                    if m:
+                        year = m.group(0)
+                    else:
+                        year = "Uploaded"
+
+                results.append((paper_id, year, tagged_text))
+
+        return results
+
+    def get_output(self, paper_id: str, kind: str, input_hash: str) -> Optional[Any]:
+        """Fetch cached generated output for (paper_id, kind, input_hash)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT content FROM generated_outputs
+                   WHERE paper_id = ? AND kind = ? AND input_hash = ?""",
+                (paper_id, kind, input_hash),
+            ).fetchone()
+            if not row:
+                return None
+            try:
+                return json.loads(row[0])
+            except Exception:
+                return row[0]
+
+    def save_output(self, paper_id: str, kind: str, input_hash: str, content: Any) -> None:
+        """Persist generated output as JSON with timestamp."""
+        now = time.time()
+        serialized = json.dumps(content)
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO generated_outputs
+                   (paper_id, kind, input_hash, content, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (paper_id, kind, input_hash, serialized, now),
+            )
+            conn.commit()
+
+    @staticmethod
+    def _normalize_query(query: str) -> str:
+        """Lowercase with collapsed whitespace."""
+        return " ".join(query.lower().split())
+
+    def get_web(self, query: str) -> Optional[Any]:
+        """Fetch web cache entry. Expires after 24h (86400s). Query is normalized."""
+        query_norm = self._normalize_query(query)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT content, created_at FROM web_cache WHERE query_norm = ?",
+                (query_norm,),
+            ).fetchone()
+            if not row:
+                return None
+            content_str, created_at = row
+            if time.time() - created_at > 86400:
+                conn.execute("DELETE FROM web_cache WHERE query_norm = ?", (query_norm,))
+                conn.commit()
+                return None
+            try:
+                return json.loads(content_str)
+            except Exception:
+                return content_str
+
+    def save_web(self, query: str, content: Any) -> None:
+        """Persist web search results as JSON with 24h timestamp."""
+        query_norm = self._normalize_query(query)
+        now = time.time()
+        serialized = json.dumps(content)
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO web_cache (query_norm, content, created_at)
+                   VALUES (?, ?, ?)""",
+                (query_norm, serialized, now),
+            )
+            conn.commit()
+
