@@ -58,6 +58,30 @@ class CacheStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS usage_log (
+                    day TEXT,
+                    kind TEXT,
+                    n INTEGER,
+                    PRIMARY KEY(day, kind)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS question_topics (
+                    paper_id TEXT,
+                    subject TEXT,
+                    q_idx INTEGER,
+                    q_no TEXT,
+                    text TEXT,
+                    marks INTEGER,
+                    topic TEXT,
+                    PRIMARY KEY(paper_id, subject, q_idx)
+                )
+                """
+            )
             # Guarded migration: add ocr_conf column if it was added after the
             # table was first created (old deployments won't have it).
             existing_cols = {
@@ -251,4 +275,111 @@ class CacheStore:
                 (query_norm, serialized, now),
             )
             conn.commit()
+
+    def bump_usage(self, kind: str) -> None:
+        """Increment today's UTC usage counter for `kind` in one transaction."""
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO usage_log (day, kind, n)
+                   VALUES (?, ?, 1)
+                   ON CONFLICT(day, kind) DO UPDATE SET n = n + 1""",
+                (today, kind),
+            )
+            conn.commit()
+
+    def get_usage(self, kind: str) -> int:
+        """Return today's UTC usage count for `kind`, or 0 if none recorded."""
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT n FROM usage_log WHERE day = ? AND kind = ?",
+                (today, kind),
+            ).fetchone()
+            return row[0] if row else 0
+
+    def has_topic_map(self, paper_id: str, subject: str) -> bool:
+        """Return True if a topic map exists for (paper_id, subject)."""
+        sub = (subject or "").strip().lower()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM question_topics WHERE paper_id = ? AND subject = ? LIMIT 1",
+                (paper_id, sub),
+            ).fetchone()
+            return row is not None
+
+    def save_topic_map(self, paper_id: str, subject: str, rows: List[Dict[str, Any]]) -> None:
+        """Replace topic map for (paper_id, subject) in one transaction."""
+        sub = (subject or "").strip().lower()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM question_topics WHERE paper_id = ? AND subject = ?", (paper_id, sub))
+            for r in rows:
+                conn.execute(
+                    """INSERT INTO question_topics (paper_id, subject, q_idx, q_no, text, marks, topic)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        paper_id,
+                        sub,
+                        int(r["q_idx"]),
+                        str(r.get("q_no", "")),
+                        str(r.get("text", "")),
+                        int(r.get("marks", 0) or 0),
+                        str(r.get("topic", "")),
+                    ),
+                )
+            conn.commit()
+
+    def get_topic_map(self, paper_id: str, subject: str) -> List[Dict[str, Any]]:
+        """Return cached topic map rows ordered by q_idx."""
+        sub = (subject or "").strip().lower()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """SELECT q_idx, q_no, text, marks, topic
+                   FROM question_topics
+                   WHERE paper_id = ? AND subject = ?
+                   ORDER BY q_idx""",
+                (paper_id, sub),
+            )
+            return [
+                {
+                    "q_idx": row[0],
+                    "q_no": row[1],
+                    "text": row[2],
+                    "marks": row[3],
+                    "topic": row[4],
+                }
+                for row in cursor.fetchall()
+            ]
+
+    def get_subject_topics(self, subject: str, limit: int = 40) -> List[str]:
+        """Return distinct topics for a subject ordered by frequency."""
+        sub = (subject or "").strip().lower()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """SELECT topic, COUNT(*) as cnt
+                   FROM question_topics
+                   WHERE subject = ? AND topic IS NOT NULL AND TRIM(topic) != ''
+                   GROUP BY topic
+                   ORDER BY cnt DESC
+                   LIMIT ?""",
+                (sub, limit),
+            )
+            return [row[0] for row in cursor.fetchall()]
+
+    def get_subject_questions(self, subject: str, limit: int = 600) -> List[Tuple[str, str]]:
+        """Return [(text, topic)] from tagged rows of subject, excluding 'Other' and 'Uncategorized'."""
+        sub = (subject or "").strip().lower()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """SELECT text, topic
+                   FROM question_topics
+                   WHERE subject = ?
+                     AND LOWER(topic) NOT IN ('other', 'uncategorized')
+                     AND TRIM(text) != ''
+                   LIMIT ?""",
+                (sub, limit),
+            )
+            return [(row[0], row[1]) for row in cursor.fetchall()]
 

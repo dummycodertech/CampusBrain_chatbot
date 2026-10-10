@@ -152,6 +152,92 @@ def predict_topics(papers: List[Any]) -> List[Dict[str, Any]]:
     return results
 
 
+def predict_topics_from_rows(tagged: List[Any]) -> List[Dict[str, Any]]:
+    """Predict likely topics driven by AI-tagged question rows.
+
+    Args:
+        tagged: List of (year, rows) or (paper_id, year, rows) where rows have 'topic'.
+
+    Returns:
+        List of dicts ordered by score descending, each containing:
+            - "topic": Topic name
+            - "score": Recency-weighted score = sum over papers of 1 / (1 + years_ago)
+            - "count": Total questions matched for this topic
+            - "years": List of years the topic appeared in (newest first)
+            - "due": True if topic appeared in >=2 years but is absent from the most recent 1-2 papers
+    """
+    if not tagged:
+        return []
+
+    parsed_papers: List[Tuple[str, int, List[Dict[str, Any]]]] = []
+    valid_years: List[int] = []
+
+    for item in tagged:
+        if len(item) == 3:
+            _pid, y_val, rows = item
+        elif len(item) == 2:
+            y_val, rows = item
+        else:
+            continue
+
+        y_str = str(y_val).strip() if y_val else "Uploaded"
+        y_int = _year_num(y_str)
+        parsed_papers.append((y_str, y_int, rows or []))
+        if y_int > 0:
+            valid_years.append(y_int)
+
+    unique_sorted_years = sorted(list(set(valid_years)))
+    max_year = max(unique_sorted_years) if unique_sorted_years else 0
+
+    topic_scores: Dict[str, float] = defaultdict(float)
+    topic_counts: Dict[str, int] = defaultdict(int)
+    topic_years: Dict[str, Set[str]] = defaultdict(set)
+
+    for y_str, y_int, rows in parsed_papers:
+        if max_year > 0 and y_int > 0:
+            years_ago = max(0, max_year - y_int)
+        else:
+            years_ago = 0
+        weight = 1.0 / (1.0 + years_ago)
+
+        paper_topics_seen: Set[str] = set()
+        for r in rows:
+            top = (r.get("topic") or "Uncategorized").strip()
+            topic_counts[top] += 1
+            paper_topics_seen.add(top)
+
+        for top in paper_topics_seen:
+            topic_scores[top] += weight
+            topic_years[top].add(y_str)
+
+    results: List[Dict[str, Any]] = []
+    for topic, cnt in topic_counts.items():
+        if cnt == 0:
+            continue
+        score = round(topic_scores.get(topic, 0.0), 2)
+        years_set = topic_years.get(topic, set())
+        years_sorted = sorted(list(years_set), key=_year_num, reverse=True)
+
+        num_years_appeared = len(years_set)
+        years_int_set = {_year_num(y) for y in years_set}
+        is_due = (
+            num_years_appeared >= 2
+            and len(unique_sorted_years) >= 2
+            and max_year not in years_int_set
+        )
+
+        results.append({
+            "topic": topic,
+            "score": score,
+            "count": cnt,
+            "years": years_sorted,
+            "due": is_due,
+        })
+
+    results.sort(key=lambda x: (x["score"], x["count"]), reverse=True)
+    return results
+
+
 def find_repeated_questions(papers: List[Any]) -> List[Dict[str, Any]]:
     """Identify questions asked across 2 or more distinct years using difflib similarity > 0.8.
 

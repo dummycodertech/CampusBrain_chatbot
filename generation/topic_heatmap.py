@@ -160,3 +160,42 @@ def generate_topic_heatmap(paper_text: str, cached_summary: str = "") -> dict:
         })
 
     return {"topics": topics}
+
+
+def build_heatmap_from_rows(rows: list) -> dict:
+    """Build topic frequency data from question rows.
+
+    Returns {"topics": [{"topic": str, "questions": int, "marks": int, "description": str}, ...]}
+    """
+    if not rows:
+        return {"topics": []}
+
+    topic_counts = defaultdict(int)
+    topic_marks = defaultdict(int)
+
+    for r in rows:
+        top = (r.get("topic") or "Uncategorized").strip()
+        topic_counts[top] += 1
+        m = r.get("marks", 0) or 0
+        if m > 0:
+            topic_marks[top] += m
+
+    sorted_topics = sorted(
+        topic_counts.items(),
+        key=lambda x: (x[1], topic_marks.get(x[0], 0)),
+        reverse=True,
+    )[:8]
+
+    topics = []
+    for name, count in sorted_topics:
+        desc_keywords = TOPIC_KEYWORDS.get(name, [])
+        desc = ", ".join(desc_keywords[:3]) if desc_keywords else name
+        topics.append({
+            "topic": name,
+            "questions": count,
+            "marks": topic_marks.get(name, 0),
+            "description": desc,
+        })
+
+    return {"topics": topics}
+

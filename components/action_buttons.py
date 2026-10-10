@@ -21,15 +21,33 @@ from services.llm_client import LLMUnavailableError
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _render_heatmap(paper_text: str) -> None:
+def _render_heatmap(paper_text: str, subject: str = "") -> None:
     """Render the topic frequency bar chart + detail table."""
-    with st.spinner("Analysing topic distribution..."):
+    import pandas as pd
+    from storage.cache_store import CacheStore
+    from generation.topic_tagger import tag_paper_topics
+    from generation.topic_heatmap import build_heatmap_from_rows
+
+    store = CacheStore()
+    paper_id = st.session_state.get("current_paper_id", "")
+    sub = (subject or "").strip()
+    if not sub or sub.lower() == "unknown":
+        if paper_id:
+            sub = store.get_paper_subject(paper_id) or ""
+    if not sub or sub.lower() == "unknown":
+        sub = "General"
+
+    with st.spinner("Detecting topics (once per paper)..."):
         try:
-            data = generate_topic_heatmap(paper_text)
+            rows, used_llm = tag_paper_topics(paper_id, sub, paper_text)
         except Exception as e:
             st.error(f"Could not generate heatmap: {e}")
             return
 
+    if not used_llm:
+        st.warning("AI topic detection was unavailable, so these topics may be incomplete. Try again in a minute.")
+
+    data = build_heatmap_from_rows(rows)
     topics = data.get("topics", [])
     if not topics:
         st.warning("No topics extracted — try a different paper.")
@@ -40,16 +58,12 @@ def _render_heatmap(paper_text: str) -> None:
         "📊 Topic Frequency Heatmap</p>",
         unsafe_allow_html=True,
     )
+    st.caption("Topics are detected by AI once per paper and then saved, so repeat views are free.")
 
-    # Bar chart — st.bar_chart is zero-cost (pure frontend)
-    import pandas as pd
     df = pd.DataFrame(topics).set_index("topic")
-
-    # Show questions column as the bar chart (always present)
     chart_col = "questions"
     st.bar_chart(df[[chart_col]], height=280)
 
-    # Detail table
     display_df = df[["questions", "marks", "description"]].rename(
         columns={"questions": "Questions", "marks": "Marks", "description": "What it covers"}
     )
@@ -61,41 +75,65 @@ def _render_top_topics(paper_text: str, subject: str = "") -> None:
     import re
     import pandas as pd
     from storage.cache_store import CacheStore
-    from generation.topic_questions import top_topics_with_questions
+    from generation.topic_tagger import ensure_tagged, tag_paper_topics
+    from generation.topic_questions import top_topics_from_rows
 
     st.markdown(
         '<p style="color:#c4b5fd; font-weight:600; font-size:1.05rem; margin-bottom:0.5rem;">'
         "🏆 Top 5 Topics & Past Questions</p>",
         unsafe_allow_html=True,
     )
+    st.caption("Topics are detected by AI once per paper and then saved, so repeat views are free.")
 
     store = CacheStore()
-    papers = []
-    if subject and subject.strip() and subject.lower() != "unknown":
-        papers = store.get_subject_papers(subject)
-
-    # Retry with detected paper subject if get_subject_papers(subject) returned nothing
     current_paper_id = st.session_state.get("current_paper_id", "")
-    if not papers and current_paper_id:
-        fallback_subject = store.get_paper_subject(current_paper_id)
-        if fallback_subject:
-            papers = store.get_subject_papers(fallback_subject)
+    sub = (subject or "").strip()
+    if not sub or sub.lower() == "unknown":
+        if current_paper_id:
+            sub = store.get_paper_subject(current_paper_id) or ""
+    if not sub or sub.lower() == "unknown":
+        sub = "General"
 
-    # Fallback to current paper if no subject papers found in cache
+    papers = store.get_subject_papers(sub) if sub != "General" else []
     if not papers and paper_text and paper_text.strip():
         m = re.search(r"20\d{2}", paper_text[:1000])
         curr_year = m.group(0) if m else "Uploaded"
-        papers = [("current", curr_year, paper_text)]
+        papers = [(current_paper_id or "current", curr_year, paper_text)]
 
     if len(papers) == 1:
         st.info("ℹ️ Only 1 paper available; open more years of this subject to see trends.")
 
-    with st.spinner("Extracting top recurring topics and past questions..."):
-        try:
-            top_topics = top_topics_with_questions(papers, n=5, per_topic=4)
-        except Exception as e:
-            st.error(f"Could not extract top topics: {e}")
+    total_p = len(papers)
+    prog = st.progress(0, text=f"Tagging paper 1 of {total_p}...")
+    def _on_prog(done, total):
+        pct = done / total if total > 0 else 1.0
+        prog.progress(pct, text=f"Tagging paper {done} of {total}...")
+
+    tagged_results = ensure_tagged(papers, sub, max_new=6, on_progress=_on_prog)
+    prog.empty()
+
+    tagged = [(year, rows) for pid, year, rows, used_llm in tagged_results if rows]
+    untagged_count = sum(1 for pid, year, rows, used_llm in tagged_results if not rows)
+    if untagged_count > 0:
+        st.info(f"{untagged_count} paper(s) not tagged yet; click again to continue.")
+
+    if not tagged:
+        with st.spinner("Detecting topics (once per paper)..."):
+            cur_rows, cur_used = tag_paper_topics(current_paper_id or "current", sub, paper_text)
+        if not cur_used:
+            st.warning("AI topic detection was unavailable, so these topics may be incomplete. Try again in a minute.")
+        if cur_rows:
+            m = re.search(r"20\d{2}", paper_text[:1000])
+            curr_year = m.group(0) if m else "Uploaded"
+            tagged = [(curr_year, cur_rows)]
+        else:
             return
+
+    try:
+        top_topics = top_topics_from_rows(tagged, n=5, per_topic=4)
+    except Exception as e:
+        st.error(f"Could not extract top topics: {e}")
+        return
 
     if not top_topics:
         st.warning("No questions could be matched to recurring topics in available papers.")
@@ -129,33 +167,31 @@ def _render_predictor(paper_text: str, subject: str = "") -> None:
     """Render exam predictor: ranked topic table and repeated past questions."""
     import re
     import pandas as pd
+    from collections import Counter
     from storage.cache_store import CacheStore
-    from generation.predictor import predict_topics, find_repeated_questions
+    from generation.topic_tagger import ensure_tagged
+    from generation.predictor import predict_topics_from_rows, find_repeated_questions
     from generation.topic_questions import _year_num
 
     store = CacheStore()
-    papers = []
-    if subject and subject.strip() and subject.lower() != "unknown":
-        papers = store.get_subject_papers(subject)
-
-    # Retry with detected paper subject if get_subject_papers(subject) returned nothing
     current_paper_id = st.session_state.get("current_paper_id", "")
-    if not papers and current_paper_id:
-        fallback_subject = store.get_paper_subject(current_paper_id)
-        if fallback_subject:
-            papers = store.get_subject_papers(fallback_subject)
+    sub = (subject or "").strip()
+    if not sub or sub.lower() == "unknown":
+        if current_paper_id:
+            sub = store.get_paper_subject(current_paper_id) or ""
+    if not sub or sub.lower() == "unknown":
+        sub = "General"
 
-    # If no subject papers found in cache, check current paper
+    papers = store.get_subject_papers(sub) if sub != "General" else []
     if not papers and paper_text and paper_text.strip():
         m = re.search(r"20\d{2}", paper_text[:1000])
         curr_year = m.group(0) if m else "Uploaded"
-        papers = [("current", curr_year, paper_text)]
+        papers = [(current_paper_id or "current", curr_year, paper_text)]
 
     if len(papers) < 2:
         st.info("Open at least 2 papers of this subject for predictions")
         return
 
-    from collections import Counter
     year_counts = Counter(str(p[1]) for p in papers)
 
     paper_labels = []
@@ -188,10 +224,29 @@ def _render_predictor(paper_text: str, subject: str = "") -> None:
         "🎯 Likely topics (heuristic, not a guarantee)</p>",
         unsafe_allow_html=True,
     )
+    st.caption("Topics are detected by AI once per paper and then saved, so repeat views are free.")
+
+    total_p = len(filtered_papers)
+    prog = st.progress(0, text=f"Tagging paper 1 of {total_p}...")
+    def _on_prog(done, total):
+        pct = done / total if total > 0 else 1.0
+        prog.progress(pct, text=f"Tagging paper {done} of {total}...")
+
+    tagged_results = ensure_tagged(filtered_papers, sub, max_new=6, on_progress=_on_prog)
+    prog.empty()
+
+    tagged = [(pid, year, rows) for pid, year, rows, used_llm in tagged_results if rows]
+    untagged_count = sum(1 for pid, year, rows, used_llm in tagged_results if not rows)
+    if untagged_count > 0:
+        st.info(f"{untagged_count} paper(s) not tagged yet; click again to continue.")
+
+    if len(tagged) < 2:
+        st.info("Open at least 2 papers of this subject for predictions")
+        return
 
     with st.spinner("Analysing multi-year exam trends..."):
         try:
-            topic_preds = predict_topics(filtered_papers)
+            topic_preds = predict_topics_from_rows(tagged)
             repeat_questions = find_repeated_questions(filtered_papers)
         except Exception as e:
             st.error(f"Could not compute predictions: {e}")
@@ -477,7 +532,7 @@ def render_action_buttons(paper_text: str, subject: str = "") -> None:
     # ── Inline panels (toggled by buttons above) ──────────────────────────────
     if st.session_state.get("show_heatmap"):
         st.markdown("---")
-        _render_heatmap(paper_text)
+        _render_heatmap(paper_text, subject=subject)
 
     if st.session_state.get("show_top_topics"):
         st.markdown("---")

@@ -8,9 +8,11 @@ Provider:
   Text → Groq openai/gpt-oss-120b (fast inference, free tier)
          with fallback chain → gpt-oss-20b → configurable via GROQ_MODEL_CHAIN
 """
+from __future__ import annotations
 import functools
 import os
 import threading
+from typing import Optional
 from groq import Groq
 
 
@@ -43,12 +45,20 @@ _TRACKED_HEADERS = [
 ]
 
 
-def _update_rate_info(headers) -> None:
-    """Save Groq rate limit headers into module state thread-safely."""
+def _update_rate_info(model_or_headers, headers=None) -> None:
+    """Save Groq rate limit headers into module state thread-safely, keyed by model."""
     global _printed_headers
-    if not headers:
+    if headers is None:
+        raw_headers = model_or_headers
+        active = _get_active_model_chain()
+        model = active[0] if active else _DEFAULT_MODEL_CHAIN[0]
+    else:
+        model = str(model_or_headers)
+        raw_headers = headers
+
+    if not raw_headers:
         return
-    headers_dict = {str(k).lower(): str(v) for k, v in headers.items()}
+    headers_dict = {str(k).lower(): str(v) for k, v in raw_headers.items()}
 
     if not _printed_headers:
         ratelimit_keys = [k for k in headers_dict.keys() if "ratelimit" in k]
@@ -56,15 +66,54 @@ def _update_rate_info(headers) -> None:
         _printed_headers = True
 
     with _rate_info_lock:
+        if model not in _rate_info:
+            _rate_info[model] = {}
         for key in _TRACKED_HEADERS:
             if key in headers_dict:
-                _rate_info[key] = headers_dict[key]
+                _rate_info[model][key] = headers_dict[key]
 
 
-def get_rate_info() -> dict:
-    """Return a snapshot of the latest Groq rate limit headers."""
+def get_rate_info(model: str | None = None) -> dict:
+    """Return a snapshot of the latest Groq rate limit headers for a model.
+
+    Defaults to the first model in the active chain.
+    """
+    if model is None:
+        active = _get_active_model_chain()
+        model = active[0] if active else _DEFAULT_MODEL_CHAIN[0]
     with _rate_info_lock:
-        return dict(_rate_info)
+        return dict(_rate_info.get(model, {}))
+
+
+def quota_ok(model: str | None = None, min_requests: int = 5, min_tokens: int = 2000) -> bool:
+    """Check if remaining Groq quota for a model meets the required minimums.
+
+    Uses get_rate_info(model).
+    Returns True when there is no data yet or headers are missing or unparseable.
+    Returns False if remaining requests < min_requests or remaining tokens < min_tokens.
+    """
+    info = get_rate_info(model)
+    if not info:
+        return True
+
+    rem_req_val = info.get("x-ratelimit-remaining-requests")
+    rem_tokens_val = info.get("x-ratelimit-remaining-tokens")
+
+    if rem_req_val is not None:
+        try:
+            if int(rem_req_val) < min_requests:
+                return False
+        except (ValueError, TypeError):
+            pass
+
+    if rem_tokens_val is not None:
+        try:
+            if int(rem_tokens_val) < min_tokens:
+                return False
+        except (ValueError, TypeError):
+            pass
+
+    return True
 
 
 @functools.lru_cache(maxsize=1)
@@ -111,14 +160,14 @@ def get_groq_client() -> Groq:
 
 def generate_text(
     prompt: str,
-    model: str = "openai/gpt-oss-120b",
+    model: str | None = None,
     temperature: float = 0.2,
     max_tokens: int = 2048,
 ) -> str:
     """Send a text prompt to Groq and return the completion string.
 
-    Tries the requested model first, then every model in the active chain
-    returned by _get_active_model_chain().  If every attempt fails or returns
+    Tries the requested model first (if specified), then every model in the active
+    chain returned by _get_active_model_chain(). If every attempt fails or returns
     empty content, raises LLMUnavailableError so callers can show a friendly
     message instead of a blank UI.
 
@@ -141,9 +190,12 @@ def generate_text(
     except Exception:
         pass
 
-    # Build chain: requested model first, then the rest of the active chain.
+    # Build chain: requested model first (if specified), then the rest of the active chain.
     active_chain = _get_active_model_chain()
-    model_chain = [model] + [m for m in active_chain if m != model]
+    if model:
+        model_chain = [model] + [m for m in active_chain if m != model]
+    else:
+        model_chain = list(active_chain)
 
     client = get_groq_client()
     for attempt_model in model_chain:
@@ -154,13 +206,13 @@ def generate_text(
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
-            # Capture rate-limit headers
-            _update_rate_info(raw_response.headers)
+            # Capture rate-limit headers under the model that was called
+            _update_rate_info(attempt_model, raw_response.headers)
             response = raw_response.parse()
             content = response.choices[0].message.content
             finish_reason = response.choices[0].finish_reason
             if content:
-                if attempt_model != model:
+                if model and attempt_model != model:
                     print(f"[generate_text] Used fallback model {attempt_model} (primary returned empty)")
                 return content
             # content is None or empty — try next
@@ -171,7 +223,7 @@ def generate_text(
         except Exception as e:
             resp = getattr(e, "response", None)
             if resp is not None and hasattr(resp, "headers"):
-                _update_rate_info(resp.headers)
+                _update_rate_info(attempt_model, resp.headers)
             print(f"[generate_text] {attempt_model} raised {type(e).__name__}: {e} — trying next model")
 
     raise LLMUnavailableError(

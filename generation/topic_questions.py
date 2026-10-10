@@ -173,3 +173,78 @@ def top_topics_with_questions(
     # Rank by (count, total_marks) descending
     results.sort(key=lambda t: (t["count"], t["total_marks"]), reverse=True)
     return results[:n]
+
+
+def top_topics_from_rows(
+    tagged: List[Tuple[Any, List[Dict[str, Any]]]],
+    n: int = 5,
+    per_topic: int = 4,
+) -> List[Dict[str, Any]]:
+    """Rank top topics across tagged question rows and return exact past questions.
+
+    Args:
+        tagged: List of tuples (year, rows) where rows are question dicts with 'topic', 'text', 'q_no', 'marks'.
+        n: Number of top topics to return (default 5).
+        per_topic: Max questions per topic to return (default 4).
+
+    Returns:
+        List of dicts: [
+            {
+                "topic": str,
+                "count": int,
+                "total_marks": int,
+                "years": list[str],
+                "questions": [
+                    {"year": str, "years": list[str], "q_no": str, "marks": int, "text": str}, ...
+                ]
+            }, ...
+        ] ranked by (count, total_marks) descending.
+    """
+    if not tagged:
+        return []
+
+    topic_map: Dict[str, Dict[str, Any]] = defaultdict(
+        lambda: {"questions": [], "count": 0, "total_marks": 0, "years": set()}
+    )
+
+    for item in tagged:
+        if not item or len(item) < 2:
+            continue
+        year, rows = item[0], item[1]
+        year_str = str(year).strip() if year else "Uploaded"
+
+        for idx, r in enumerate(rows, start=1):
+            topic = (r.get("topic") or "Uncategorized").strip()
+            marks = r.get("marks", 0) or 0
+            q_no = r.get("q_no") or _extract_q_no(r.get("text", ""), idx)
+            clean_text = _clean_question_text(r.get("text", ""))
+
+            topic_map[topic]["count"] += 1
+            topic_map[topic]["total_marks"] += marks
+            topic_map[topic]["years"].add(year_str)
+            topic_map[topic]["questions"].append({
+                "year": year_str,
+                "years": [year_str],
+                "q_no": q_no,
+                "marks": marks,
+                "text": clean_text,
+            })
+
+    if not topic_map:
+        return []
+
+    results: List[Dict[str, Any]] = []
+    for topic_name, data in topic_map.items():
+        merged_qs = _merge_near_duplicates(data["questions"])
+        sorted_years = sorted(list(data["years"]), key=_year_num, reverse=True)
+        results.append({
+            "topic": topic_name,
+            "count": data["count"],
+            "total_marks": data["total_marks"],
+            "years": sorted_years,
+            "questions": merged_qs[:per_topic],
+        })
+
+    results.sort(key=lambda t: (t["count"], t["total_marks"]), reverse=True)
+    return results[:n]
+
