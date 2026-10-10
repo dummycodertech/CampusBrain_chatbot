@@ -15,7 +15,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from generation.json_utils import extract_json
-from generation.topic_heatmap import extract_marks, score_question, split_into_questions
+from generation.topic_heatmap import extract_marks, split_into_questions
 from generation.topic_questions import _extract_q_no
 from services.llm_client import LLMUnavailableError, generate_text, quota_ok
 from storage.cache_store import CacheStore
@@ -141,17 +141,13 @@ def tag_paper_topics(
         )
         return rows, True
 
-    # Helper for fallback (g)
+    # Helper for fallback (g): mark pending rows Uncategorized, do NOT save
     def _apply_fallback() -> Tuple[List[Dict[str, Any]], bool]:
         for pr in pending_rows:
-            scores = score_question(pr["text"])
-            if scores:
-                pr["topic"] = max(scores, key=scores.get)
-            else:
-                pr["topic"] = "Uncategorized"
+            pr["topic"] = "Uncategorized"
         print(
             f"[tagger] paper={paper_id[:8]} subject={subject} "
-            f"total={total_count} inherited={inherited_count} sent_to_llm=0 model={TAGGING_MODEL}"
+            f"total={total_count} inherited={inherited_count} sent_to_llm=0 model={TAGGING_MODEL} (fallback/no-save)"
         )
         return rows, False
 

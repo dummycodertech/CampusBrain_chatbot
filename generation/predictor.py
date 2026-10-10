@@ -2,8 +2,8 @@
 Exam Predictor engine for Campus Brain.
 
 Analyses past papers for a subject across multiple years using zero LLM calls.
-Calculates recency-weighted topic probability scores, detects 'due for return'
-topics, and identifies near-duplicate questions repeated across different exam years.
+Calculates recency-weighted topic probability scores from AI-tagged rows,
+detects 'due for return' topics, and identifies near-duplicate questions.
 
 No Streamlit dependencies.
 """
@@ -15,9 +15,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, Set, Tuple
 
 from generation.topic_heatmap import (
-    TOPIC_KEYWORDS,
     extract_marks,
-    score_question,
     split_into_questions,
 )
 from generation.topic_questions import (
@@ -56,100 +54,6 @@ def _normalize_question_for_match(text: str) -> str:
     return " ".join(t.lower().split())
 
 
-def predict_topics(papers: List[Any]) -> List[Dict[str, Any]]:
-    """Predict likely topics for an upcoming exam based on past year frequency and recency.
-
-    Args:
-        papers: List of paper tuples (paper_id, year, text) or (year, text).
-
-    Returns:
-        List of dicts ordered by score descending, each containing:
-            - "topic": Topic name
-            - "score": Recency-weighted score = sum over papers of 1 / (1 + years_ago)
-            - "count": Total questions matched for this topic
-            - "years": List of years the topic appeared in (newest first)
-            - "due": True if topic appeared in >=2 years but is absent from the most recent 1-2 papers
-    """
-    if not papers:
-        return []
-
-    # Parse and extract year for each paper
-    parsed_papers: List[Tuple[str, str, int, str]] = []  # (paper_id, year_str, year_num, text)
-    valid_years: List[int] = []
-
-    for p in papers:
-        pid, y_str, text = _parse_paper_tuple(p)
-        y_int = _year_num(y_str)
-        if y_int == 0:
-            m = re.search(r"20\d{2}", text[:1000])
-            if m:
-                y_int = int(m.group(0))
-                y_str = str(y_int)
-        parsed_papers.append((pid, y_str, y_int, text))
-        if y_int > 0:
-            valid_years.append(y_int)
-
-    # Determine most recent years for weighting and due check
-    unique_sorted_years = sorted(list(set(valid_years)))
-    max_year = max(unique_sorted_years) if unique_sorted_years else 0
-
-    # Track topic data across papers
-    topic_scores: Dict[str, float] = defaultdict(float)
-    topic_counts: Dict[str, int] = defaultdict(int)
-    topic_years: Dict[str, Set[str]] = defaultdict(set)
-
-    for pid, y_str, y_int, text in parsed_papers:
-        if max_year > 0 and y_int > 0:
-            years_ago = max(0, max_year - y_int)
-        else:
-            years_ago = 0
-        weight = 1.0 / (1.0 + years_ago)
-
-        questions = split_into_questions(text)
-        paper_topics_seen: Set[str] = set()
-
-        for q in questions:
-            scores = score_question(q)
-            for top, cnt in scores.items():
-                if cnt > 0:
-                    topic_counts[top] += cnt
-                    paper_topics_seen.add(top)
-
-        for top in paper_topics_seen:
-            topic_scores[top] += weight
-            topic_years[top].add(y_str)
-
-    results: List[Dict[str, Any]] = []
-    for topic in TOPIC_KEYWORDS.keys():
-        cnt = topic_counts.get(topic, 0)
-        if cnt == 0:
-            continue
-        score = round(topic_scores.get(topic, 0.0), 2)
-        years_set = topic_years.get(topic, set())
-        years_sorted = sorted(list(years_set), key=_year_num, reverse=True)
-
-        # Due check: appeared in 2 or more years but absent from the most recent 1-2 papers
-        num_years_appeared = len(years_set)
-        # Check if topic appeared in max_year (most recent paper)
-        years_int_set = {_year_num(y) for y in years_set}
-        # Absent from the most recent 1-2 papers
-        is_due = (
-            num_years_appeared >= 2
-            and len(unique_sorted_years) >= 2
-            and max_year not in years_int_set
-        )
-
-        results.append({
-            "topic": topic,
-            "score": score,
-            "count": cnt,
-            "years": years_sorted,
-            "due": is_due,
-        })
-
-    # Sort by score descending, then count descending
-    results.sort(key=lambda x: (x["score"], x["count"]), reverse=True)
-    return results
 
 
 def predict_topics_from_rows(tagged: List[Any]) -> List[Dict[str, Any]]:

@@ -14,7 +14,6 @@ import streamlit as st
 from generation.summary import summarize_paper
 from generation.quiz import generate_quiz
 from generation.flashcards import generate_flashcards
-from generation.topic_heatmap import generate_topic_heatmap
 from generation.answer_checker import check_answer
 from services.llm_client import LLMUnavailableError
 
@@ -45,7 +44,10 @@ def _render_heatmap(paper_text: str, subject: str = "") -> None:
             return
 
     if not used_llm:
-        st.warning("AI topic detection was unavailable, so these topics may be incomplete. Try again in a minute.")
+        from generation.topic_tagger import get_last_notice
+        notice = get_last_notice(paper_id) or "AI topic detection was unavailable. Try again in a minute."
+        st.warning(notice)
+        return
 
     data = build_heatmap_from_rows(rows)
     topics = data.get("topics", [])
