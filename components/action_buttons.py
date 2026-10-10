@@ -138,36 +138,35 @@ def _render_predictor(paper_text: str, subject: str = "") -> None:
         papers = [("current", curr_year, paper_text)]
 
     if len(papers) < 2:
-        st.info("Open at least 2 years of this subject for predictions")
+        st.info("Open at least 2 papers of this subject for predictions")
         return
 
-    # Extract all distinct years
-    all_years = []
-    for p in papers:
-        y_str = str(p[1]) if len(p) > 1 else ""
-        m = re.search(r"20\d{2}", y_str)
-        yr_clean = m.group(0) if m else y_str
-        if yr_clean and yr_clean not in all_years:
-            all_years.append(yr_clean)
-    all_years.sort(key=_year_num, reverse=True)
+    from collections import Counter
+    year_counts = Counter(str(p[1]) for p in papers)
 
-    selected_years = st.multiselect(
-        "Select years for prediction:",
-        options=all_years,
-        default=all_years,
+    paper_labels = []
+    label_to_paper = {}
+    for p in papers:
+        pid = str(p[0])
+        yr = str(p[1])
+        label = yr if year_counts[yr] == 1 else f"{yr} · {pid[:6]}"
+        paper_labels.append(label)
+        label_to_paper[label] = p
+
+    selected_labels = st.multiselect(
+        "Select papers for prediction:",
+        options=paper_labels,
+        default=paper_labels,
     )
 
-    if not selected_years or len(selected_years) < 2:
-        st.info("Open at least 2 years of this subject for predictions")
+    if not selected_labels or len(selected_labels) < 2:
+        st.info("Open at least 2 papers of this subject for predictions")
         return
 
-    filtered_papers = [
-        p for p in papers
-        if any(str(yr) in str(p[1]) for yr in selected_years)
-    ]
+    filtered_papers = [label_to_paper[lbl] for lbl in selected_labels if lbl in label_to_paper]
 
     if len(filtered_papers) < 2:
-        st.info("Open at least 2 years of this subject for predictions")
+        st.info("Open at least 2 papers of this subject for predictions")
         return
 
     st.markdown(
