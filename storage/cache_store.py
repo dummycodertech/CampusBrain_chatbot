@@ -21,7 +21,7 @@ class CacheStore:
         self._init_db()
 
     def _connect(self):
-        return sqlite3.connect(self.db_path)
+        return sqlite3.connect(self.db_path, timeout=30)
 
     def _init_db(self):
         with self._connect() as conn:
