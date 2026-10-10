@@ -173,6 +173,19 @@ class CacheStore:
 
         return results
 
+    def get_paper_subject(self, paper_id: str) -> Optional[str]:
+        """Return the most common non-'Unknown' subject among that paper's pages."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT subject, COUNT(*) as cnt FROM pages
+                   WHERE paper_id = ? AND LOWER(subject) != 'unknown' AND TRIM(subject) != ''
+                   GROUP BY subject
+                   ORDER BY cnt DESC
+                   LIMIT 1""",
+                (paper_id,),
+            ).fetchone()
+            return row[0] if row else None
+
     def get_output(self, paper_id: str, kind: str, input_hash: str) -> Optional[Any]:
         """Fetch cached generated output for (paper_id, kind, input_hash)."""
         with self._connect() as conn:

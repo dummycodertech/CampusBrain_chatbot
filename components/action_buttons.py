@@ -74,6 +74,13 @@ def _render_top_topics(paper_text: str, subject: str = "") -> None:
     if subject and subject.strip() and subject.lower() != "unknown":
         papers = store.get_subject_papers(subject)
 
+    # Retry with detected paper subject if get_subject_papers(subject) returned nothing
+    current_paper_id = st.session_state.get("current_paper_id", "")
+    if not papers and current_paper_id:
+        fallback_subject = store.get_paper_subject(current_paper_id)
+        if fallback_subject:
+            papers = store.get_subject_papers(fallback_subject)
+
     # Fallback to current paper if no subject papers found in cache
     if not papers and paper_text and paper_text.strip():
         m = re.search(r"20\d{2}", paper_text[:1000])
@@ -130,6 +137,13 @@ def _render_predictor(paper_text: str, subject: str = "") -> None:
     papers = []
     if subject and subject.strip() and subject.lower() != "unknown":
         papers = store.get_subject_papers(subject)
+
+    # Retry with detected paper subject if get_subject_papers(subject) returned nothing
+    current_paper_id = st.session_state.get("current_paper_id", "")
+    if not papers and current_paper_id:
+        fallback_subject = store.get_paper_subject(current_paper_id)
+        if fallback_subject:
+            papers = store.get_subject_papers(fallback_subject)
 
     # If no subject papers found in cache, check current paper
     if not papers and paper_text and paper_text.strip():
