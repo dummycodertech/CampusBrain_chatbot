@@ -107,6 +107,8 @@ def predict_topics_from_rows(tagged: List[Any]) -> List[Dict[str, Any]]:
         paper_topics_seen: Set[str] = set()
         for r in rows:
             top = (r.get("topic") or "Uncategorized").strip()
+            if top in ("Uncategorized", "Other"):
+                continue
             topic_counts[top] += 1
             paper_topics_seen.add(top)
 

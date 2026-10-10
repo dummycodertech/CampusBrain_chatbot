@@ -13,7 +13,7 @@ from generation.json_utils import extract_json
 from services.llm_client import generate_text, LLMUnavailableError
 from storage.cache_store import CacheStore
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2"
 
 QUIZ_PROMPT = """You are an expert exam tutor for university students.
 The text below is a Previous Year Question (PYQ) paper — it contains ONLY
@@ -34,10 +34,11 @@ Rules:
 - Each question must be clear, unambiguous, and exam-appropriate.
 - Options A–D should be plausible; only one should be correct.
 - "correct_answer" must be the FULL option text (e.g. "A. O(n log n)"), not just "A".
+- "explanation": a concise one-sentence explanation of why the correct answer is right.
 - Cover a range of topics from the paper, not just one.
 - Return ONLY valid JSON, no other text, in this exact shape:
 {{"quiz": [
-  {{"question": "...", "options": ["A. ...", "B. ...", "C. ...", "D. ..."], "correct_answer": "A. ..."}}
+  {{"question": "...", "options": ["A. ...", "B. ...", "C. ...", "D. ..."], "correct_answer": "A. ...", "explanation": "..."}}
 ]}}"""
 
 
@@ -97,7 +98,7 @@ def generate_quiz(paper_text: str, paper_id: str = "", bypass_cache: bool = Fals
             return cached
 
     try:
-        raw = generate_text(QUIZ_PROMPT.format(paper_text=paper_text))
+        raw = generate_text(QUIZ_PROMPT.format(paper_text=paper_text), max_tokens=4000)
     except LLMUnavailableError:
         return {"quiz": [{**_ERR_CARD, "question": (
             "⚠️ The AI is busy or rate-limited. Please try again in a minute."
@@ -154,7 +155,7 @@ def generate_quiz(paper_text: str, paper_id: str = "", bypass_cache: bool = Fals
     except Exception as exc:
         print(f"[quiz] JSON parse / validation failed: {exc}\nRaw output (first 500 chars):\n{raw[:500]}")
         return {"quiz": [{**_ERR_CARD, "question": (
-            f"Quiz could not be parsed from the AI response. Please try again."
+            "Quiz could not be parsed from the AI response. Please try again."
         )}]}
 
 

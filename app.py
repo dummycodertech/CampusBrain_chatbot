@@ -16,9 +16,9 @@ Design principles
 """
 from dotenv import load_dotenv
 load_dotenv()  # works locally
-
 import html
 import os
+import shutil
 import streamlit as st
 
 # On Streamlit Cloud, secrets live in st.secrets (not os.environ).
@@ -30,7 +30,7 @@ def _copy_secrets_to_env():
 
     Supports:
     - Flat string secrets:  GROQ_API_KEY = "gsk_..."
-    - Nested sections:      [groq]\\n  api_key = "gsk_..."
+    - Nested sections:      [groq]\n  api_key = "gsk_..."
     """
     import streamlit as _st
 
@@ -49,9 +49,28 @@ def _copy_secrets_to_env():
 
 _copy_secrets_to_env()
 
-# Log whether optional integrations are available (visible in Streamlit Cloud logs).
+# Startup logging (visible in server / Streamlit Cloud logs, never in UI, never print key values).
+_tesseract_found = bool(shutil.which("tesseract"))
+if not _tesseract_found:
+    try:
+        import pytesseract
+        pytesseract.get_tesseract_version()
+        _tesseract_found = True
+    except Exception:
+        pass
+
+_groq_key_set = bool(os.environ.get("GROQ_API_KEY", "").strip())
+_env_chain = os.environ.get("GROQ_MODEL_CHAIN", "").strip()
+_model_chain = [m.strip() for m in _env_chain.split(",") if m.strip()] if _env_chain else ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
 _tavily_present = bool(os.environ.get("TAVILY_API_KEY", "").strip())
-print(f"[app] Tavily web search: {'enabled' if _tavily_present else 'disabled (no TAVILY_API_KEY)'}")
+_tagging_model = os.environ.get("TAGGING_MODEL", "").strip() or "openai/gpt-oss-20b"
+
+print(f"[app] Tesseract binary: {'found' if _tesseract_found else 'not found'}")
+print(f"[app] Active Groq model chain: {', '.join(_model_chain)}")
+print(f"[app] GROQ_API_KEY set: {'yes' if _groq_key_set else 'no'}")
+print(f"[app] Tavily web search: {'on' if _tavily_present else 'off'}")
+print(f"[app] Tagging model: {_tagging_model}")
+print("[app] Storage: local SQLite (cleared on redeploy/restart)")
 
 from components.theme import inject_stitch_theme
 from ingestion.cache_writer import ingest_paper
@@ -67,6 +86,10 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="auto",
 )
+
+if not _groq_key_set:
+    st.error("GROQ_API_KEY is missing. Please add GROQ_API_KEY to your Streamlit secrets (.streamlit/secrets.toml) or environment variables.")
+    st.stop()
 
 inject_stitch_theme()
 

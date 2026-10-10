@@ -15,7 +15,6 @@ from generation.summary import summarize_paper
 from generation.quiz import generate_quiz
 from generation.flashcards import generate_flashcards
 from generation.answer_checker import check_answer
-from services.llm_client import LLMUnavailableError
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -45,8 +44,8 @@ def _render_heatmap(paper_text: str, subject: str = "") -> None:
 
     if not used_llm:
         from generation.topic_tagger import get_last_notice
-        notice = get_last_notice(paper_id) or "AI topic detection was unavailable. Try again in a minute."
-        st.warning(notice)
+        notice = get_last_notice(paper_id) or "AI topic detection was unavailable"
+        st.warning(f"Topic detection did not complete: {notice}. Click again in a minute to retry.")
         return
 
     data = build_heatmap_from_rows(rows)
@@ -120,10 +119,19 @@ def _render_top_topics(paper_text: str, subject: str = "") -> None:
         st.info(f"{untagged_count} paper(s) not tagged yet; click again to continue.")
 
     if not tagged:
+        if tagged_results:
+            from generation.topic_tagger import get_last_notice
+            pid0 = tagged_results[0][0]
+            notice = get_last_notice(pid0) or "AI topic detection was unavailable"
+            st.warning(f"Topic detection did not complete: {notice}. Click again in a minute to retry.")
+            return
         with st.spinner("Detecting topics (once per paper)..."):
             cur_rows, cur_used = tag_paper_topics(current_paper_id or "current", sub, paper_text)
         if not cur_used:
-            st.warning("AI topic detection was unavailable, so these topics may be incomplete. Try again in a minute.")
+            from generation.topic_tagger import get_last_notice
+            notice = get_last_notice(current_paper_id or "current") or "AI topic detection was unavailable"
+            st.warning(f"Topic detection did not complete: {notice}. Click again in a minute to retry.")
+            return
         if cur_rows:
             m = re.search(r"20\d{2}", paper_text[:1000])
             curr_year = m.group(0) if m else "Uploaded"
@@ -173,7 +181,6 @@ def _render_predictor(paper_text: str, subject: str = "") -> None:
     from storage.cache_store import CacheStore
     from generation.topic_tagger import ensure_tagged
     from generation.predictor import predict_topics_from_rows, find_repeated_questions
-    from generation.topic_questions import _year_num
 
     store = CacheStore()
     current_paper_id = st.session_state.get("current_paper_id", "")
@@ -328,7 +335,6 @@ def _render_mock_paper(paper_text: str, subject: str = "") -> None:
         return
 
     # Tag papers
-    total_p = len(papers)
     prog = st.progress(0, text="Preparing topics...")
     def _on_prog(done, total):
         pct = done / total if total > 0 else 1.0
@@ -395,8 +401,10 @@ def _render_mock_paper(paper_text: str, subject: str = "") -> None:
         for sec in paper.get("sections", []):
             st.markdown(f"**{sec['section']}** — {sec['marks']} marks each")
             for q in sec.get("questions", []):
-                adj_note = " *(marks adjusted)*" if q.get("adjusted") else ""
-                st.markdown(f"{global_n}. {q['text']}  `[{q['marks']} marks]`{adj_note}")
+                adj_note = "  *(marks adjusted)*" if q.get("adjusted") else ""
+                text = str(q.get("text", "")).strip()
+                q_text = re.sub(r"\s*[\[(]\s*\d{1,2}\s*(?:marks?|m)?\s*[\])]\s*$", "", text, flags=re.I)
+                st.markdown(f"{global_n}. {q_text}  `[{q['marks']} marks]`{adj_note}")
                 global_n += 1
 
         # PDF download (with text fallback if reportlab missing)
@@ -526,16 +534,14 @@ def render_action_buttons(paper_text: str, subject: str = "") -> None:
         unsafe_allow_html=True,
     )
 
-    # ── Row 1: core actions ───────────────────────────────────────────────────
-    col1, col2, col3, col4 = st.columns(4)
     paper_id = st.session_state.get("current_paper_id", "")
+    bypass = bool(st.session_state.get("force_fresh", False))
 
-    with col1:
-        c1, c2 = st.columns([3, 2])
-        btn_summary = c1.button("📝 Summarize", use_container_width=True)
-        regen_summary = c2.button("Regenerate", key="regen_summary", use_container_width=True, help="Regenerate summary (bypass cache)")
-        if btn_summary or regen_summary:
-            bypass = bool(regen_summary)
+    # ── Row 1: Core AI Actions ────────────────────────────────────────────────
+    r1_col1, r1_col2, r1_col3 = st.columns(3)
+
+    with r1_col1:
+        if st.button("📝 Summarize", use_container_width=True):
             if not paper_text or len(paper_text.strip()) < 100:
                 st.warning(
                     "⚠️ **Not enough text was extracted from this paper** to generate a summary.\n\n"
@@ -546,7 +552,6 @@ def render_action_buttons(paper_text: str, subject: str = "") -> None:
                 spinner_msg = "Regenerating summary..." if bypass else "Summarizing..."
                 with st.spinner(spinner_msg):
                     summary = summarize_paper(paper_text, paper_id=paper_id, bypass_cache=bypass)
-                # Cache for heatmap reuse
                 st.session_state["cached_summary"] = summary
                 st.session_state.messages.append(
                     {"role": "assistant", "content": summary, "type": "text"}
@@ -555,14 +560,11 @@ def render_action_buttons(paper_text: str, subject: str = "") -> None:
                 st.session_state.show_top_topics = False
                 st.session_state.show_predictor = False
                 st.session_state.show_checker = False
+                st.session_state.show_mock = False
                 st.rerun()
 
-    with col2:
-        c1, c2 = st.columns([3, 2])
-        btn_quiz = c1.button("🧠 Quiz Me", use_container_width=True)
-        regen_quiz = c2.button("Regenerate", key="regen_quiz", use_container_width=True, help="Regenerate quiz (bypass cache)")
-        if btn_quiz or regen_quiz:
-            bypass = bool(regen_quiz)
+    with r1_col2:
+        if st.button("🧠 Quiz Me", use_container_width=True):
             if not paper_text or len(paper_text.strip()) < 100:
                 st.warning(
                     "⚠️ **Not enough text was extracted from this paper** to generate a quiz.\n\n"
@@ -585,14 +587,11 @@ def render_action_buttons(paper_text: str, subject: str = "") -> None:
                     st.session_state.show_top_topics = False
                     st.session_state.show_predictor = False
                     st.session_state.show_checker = False
+                    st.session_state.show_mock = False
                     st.rerun()
 
-    with col3:
-        c1, c2 = st.columns([3, 2])
-        btn_flashcards = c1.button("🃏 Flashcards", use_container_width=True)
-        regen_flashcards = c2.button("Regenerate", key="regen_flashcards", use_container_width=True, help="Regenerate flashcards (bypass cache)")
-        if btn_flashcards or regen_flashcards:
-            bypass = bool(regen_flashcards)
+    with r1_col3:
+        if st.button("🎴 Flashcards", use_container_width=True):
             if not paper_text or len(paper_text.strip()) < 100:
                 st.warning(
                     "⚠️ **Not enough text was extracted from this paper** to generate flashcards.\n\n"
@@ -615,33 +614,21 @@ def render_action_buttons(paper_text: str, subject: str = "") -> None:
                     st.session_state.show_top_topics = False
                     st.session_state.show_predictor = False
                     st.session_state.show_checker = False
+                    st.session_state.show_mock = False
                     st.rerun()
 
-    with col4:
-        if st.button("🗑 Clear Chat", use_container_width=True):
-            st.session_state.messages = []
-            st.session_state.show_heatmap = False
-            st.session_state.show_top_topics = False
-            st.session_state.show_predictor = False
-            st.session_state.show_checker = False
-            st.session_state.show_mock = False
-            st.session_state.pop("mock_paper", None)
-            st.rerun()
+    # ── Row 2: Analytics & Trends ─────────────────────────────────────────────
+    r2_col1, r2_col2, r2_col3 = st.columns(3)
 
-    st.markdown("<div style='margin-bottom: 0.4rem;'></div>", unsafe_allow_html=True)
-
-    # ── Row 2: analytics & tools ──────────────────────────────────────────────
-    col4, col5, col6, col7, col8 = st.columns(5)
-
-    with col4:
-        if st.button("📊 Topic Heatmap", use_container_width=True):
+    with r2_col1:
+        if st.button("📊 Heatmap", use_container_width=True):
             st.session_state.show_heatmap = not st.session_state.get("show_heatmap", False)
             st.session_state.show_top_topics = False
             st.session_state.show_predictor = False
             st.session_state.show_checker = False
             st.session_state.show_mock = False
 
-    with col5:
+    with r2_col2:
         if st.button("🏆 Top 5 Topics", use_container_width=True):
             st.session_state.show_top_topics = not st.session_state.get("show_top_topics", False)
             st.session_state.show_heatmap = False
@@ -649,15 +636,26 @@ def render_action_buttons(paper_text: str, subject: str = "") -> None:
             st.session_state.show_checker = False
             st.session_state.show_mock = False
 
-    with col6:
-        if st.button("🎯 Exam Predictor", use_container_width=True):
+    with r2_col3:
+        if st.button("🎯 Predictor", use_container_width=True):
             st.session_state.show_predictor = not st.session_state.get("show_predictor", False)
             st.session_state.show_heatmap = False
             st.session_state.show_top_topics = False
             st.session_state.show_checker = False
             st.session_state.show_mock = False
 
-    with col7:
+    # ── Row 3: Practice & Tools ───────────────────────────────────────────────
+    r3_col1, r3_col2, r3_col3 = st.columns(3)
+
+    with r3_col1:
+        if st.button("📄 Mock Paper", use_container_width=True):
+            st.session_state.show_mock = not st.session_state.get("show_mock", False)
+            st.session_state.show_heatmap = False
+            st.session_state.show_top_topics = False
+            st.session_state.show_predictor = False
+            st.session_state.show_checker = False
+
+    with r3_col2:
         if st.button("✅ Check Answer", use_container_width=True):
             st.session_state.show_checker = not st.session_state.get("show_checker", False)
             st.session_state.show_heatmap = False
@@ -665,7 +663,7 @@ def render_action_buttons(paper_text: str, subject: str = "") -> None:
             st.session_state.show_predictor = False
             st.session_state.show_mock = False
 
-    with col8:
+    with r3_col3:
         if st.session_state.get("messages"):
             export_bytes = io.BytesIO(_build_export_text().encode("utf-8"))
             st.download_button(
@@ -684,16 +682,26 @@ def render_action_buttons(paper_text: str, subject: str = "") -> None:
                 help="Start a conversation first to enable export.",
             )
 
-    # ── Row 3: mock paper ─────────────────────────────────────────────────────
-    st.markdown("<div style='margin-bottom: 0.4rem;'></div>", unsafe_allow_html=True)
-    mock_col, _ = st.columns([1, 4])
-    with mock_col:
-        if st.button("📄 Mock Paper", use_container_width=True):
-            st.session_state.show_mock = not st.session_state.get("show_mock", False)
+    # ── Row 4: Toggle & Clear ─────────────────────────────────────────────────
+    r4_col1, r4_col2, r4_col3 = st.columns(3)
+
+    with r4_col1:
+        st.toggle(
+            "↻ Fresh results",
+            key="force_fresh",
+            help="Skip saved results and regenerate with the AI",
+        )
+
+    with r4_col3:
+        if st.button("🗑 Clear Chat", use_container_width=True):
+            st.session_state.messages = []
             st.session_state.show_heatmap = False
             st.session_state.show_top_topics = False
             st.session_state.show_predictor = False
             st.session_state.show_checker = False
+            st.session_state.show_mock = False
+            st.session_state.pop("mock_paper", None)
+            st.rerun()
 
     # ── Inline panels (toggled by buttons above) ──────────────────────────────
     if st.session_state.get("show_heatmap"):

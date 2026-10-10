@@ -282,6 +282,10 @@ footer,
 }
 
 /* ─── Buttons + Download Button ──────────────────── */
+[data-testid="stHorizontalBlock"] {
+    gap: 0.6rem !important;
+}
+
 .stButton > button,
 [data-testid="stDownloadButton"] > button {
     font-family: 'Inter', sans-serif !important;
@@ -291,7 +295,12 @@ footer,
     color: #d4d4d8 !important;
     border: 1px solid rgba(255,255,255,0.1) !important;
     border-radius: 10px !important;
-    padding: 0.45rem 1.1rem !important;
+    padding: 0.4rem 0.6rem !important;
+    min-height: 3rem !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    text-align: center !important;
     transition: all 0.2s ease !important;
     letter-spacing: 0.1px;
     width: 100%;
@@ -308,6 +317,84 @@ footer,
 .stButton > button:disabled {
     opacity: 0.4 !important;
     cursor: not-allowed !important;
+}
+
+/* ─── Quota Meter Card ───────────────────────────────────── */
+.quota-card {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    padding: 0.75rem 0.85rem;
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    margin-bottom: 0.8rem;
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+.quota-card.warn-state {
+    border-color: #ef4444 !important;
+    box-shadow: 0 0 10px rgba(239, 68, 68, 0.25) !important;
+}
+.quota-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: #e4e4e7;
+    margin-bottom: 0.5rem;
+}
+.quota-head span:last-child {
+    font-size: 0.68rem;
+    font-weight: 400;
+    letter-spacing: normal;
+    text-transform: none;
+    color: #71717a;
+    white-space: nowrap;
+}
+.quota-track {
+    width: 100%;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 99px;
+    overflow: hidden;
+    position: relative;
+}
+.quota-fill {
+    height: 100%;
+    border-radius: 99px;
+    transition: width 0.4s ease;
+}
+.quota-fill.ok {
+    background: #10b981;
+    box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
+}
+.quota-fill.warn {
+    background: #f59e0b;
+    box-shadow: 0 0 8px rgba(245, 158, 11, 0.4);
+}
+.quota-fill.low {
+    background: #ef4444;
+    box-shadow: 0 0 8px rgba(239, 68, 68, 0.4);
+}
+.quota-fill.session {
+    background: linear-gradient(90deg, #7c3aed, #a78bfa);
+}
+.quota-fill.empty {
+    background: rgba(255, 255, 255, 0.15);
+}
+.quota-sub {
+    font-size: 0.72rem;
+    color: #a1a1aa;
+    margin-top: 0.3rem;
+    margin-bottom: 0.55rem;
+    white-space: nowrap;
+}
+.quota-warn-msg {
+    font-size: 0.7rem;
+    color: #f87171;
+    margin-top: 0.45rem;
+    font-weight: 500;
 }
 
 /* ─── Chat messages ──────────────────────────────────────── */

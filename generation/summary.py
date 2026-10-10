@@ -8,10 +8,10 @@ useful exam intelligence even without an answer sheet.
 from __future__ import annotations
 
 import hashlib
-from services.llm_client import generate_text, LLMUnavailableError
+from services.llm_client import generate_text_complete, get_last_finish_reason, LLMUnavailableError
 from storage.cache_store import CacheStore
 
-PROMPT_VERSION = "v2"
+PROMPT_VERSION = "v3"
 
 _BUSY_MSG = (
     "⚠️ **The AI is busy or rate-limited.** Please try again in a minute. "
@@ -74,12 +74,16 @@ def summarize_paper(paper_text: str, paper_id: str = "", bypass_cache: bool = Fa
             return cached
 
     try:
-        result = generate_text(SUMMARY_PROMPT.format(paper_text=paper_text))
+        result = generate_text_complete(SUMMARY_PROMPT.format(paper_text=paper_text), max_tokens=6000)
     except LLMUnavailableError:
         return _BUSY_MSG
 
-    # Never cache failure/fallback results or empty strings
+    # Never cache failure/fallback results, empty strings, or summaries that ended with 'length'
+    last_finish = getattr(generate_text_complete, "last_finish_reason", None) or get_last_finish_reason()
     if result and isinstance(result, str) and result.strip() and result != _BUSY_MSG and not result.startswith("⚠️"):
-        store.save_output(pid, "summary", input_hash, result)
+        if last_finish != "length":
+            store.save_output(pid, "summary", input_hash, result)
+        else:
+            print(f"[summary] Not caching summary for paper_id={pid}: last finish_reason was 'length'")
 
     return result

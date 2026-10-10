@@ -35,6 +35,10 @@ _rate_info_lock = threading.Lock()
 _rate_info: dict = {}
 _printed_headers: bool = False
 
+# Module flag: remember if API rejected reasoning_effort
+_reasoning_effort_rejected: bool = False
+_last_finish_reason: Optional[str] = None
+
 _TRACKED_HEADERS = [
     "x-ratelimit-limit-requests",
     "x-ratelimit-remaining-requests",
@@ -116,6 +120,11 @@ def quota_ok(model: str | None = None, min_requests: int = 5, min_tokens: int = 
     return True
 
 
+def get_last_finish_reason() -> Optional[str]:
+    """Return the finish_reason of the most recent LLM completion call."""
+    return _last_finish_reason
+
+
 @functools.lru_cache(maxsize=1)
 def _get_active_model_chain() -> list:
     """Return the validated list of Groq model IDs to try in order.
@@ -158,11 +167,100 @@ def get_groq_client() -> Groq:
     return Groq(api_key=os.environ["GROQ_API_KEY"])
 
 
+def _chat_once(
+    messages: list[dict],
+    model: str | None = None,
+    max_tokens: int = 2048,
+    temperature: float = 0.2,
+    reasoning_effort: str | None = "low",
+) -> tuple[str, str | None]:
+    """Execute a single chat completion attempt across the fallback chain.
+
+    Returns (content, finish_reason).
+    Captures rate-limit headers per model, logs successful calls with completion_tokens,
+    and handles reasoning_effort rejection gracefully.
+    """
+    global _reasoning_effort_rejected, _last_finish_reason
+
+    active_chain = _get_active_model_chain()
+    if model:
+        model_chain = [model] + [m for m in active_chain if m != model]
+    else:
+        model_chain = list(active_chain)
+
+    client = get_groq_client()
+    for attempt_model in model_chain:
+        call_kwargs: dict = {
+            "model": attempt_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        send_reasoning = (
+            attempt_model.startswith("openai/gpt-oss")
+            and not _reasoning_effort_rejected
+            and reasoning_effort is not None
+        )
+        if send_reasoning:
+            call_kwargs["reasoning_effort"] = reasoning_effort
+
+        try:
+            try:
+                raw_response = client.chat.completions.with_raw_response.create(**call_kwargs)
+            except Exception as e:
+                # If API rejected reasoning_effort, retry once without it and remember flag
+                if send_reasoning:
+                    err_msg = str(e).lower()
+                    status = getattr(e, "status_code", None)
+                    if status is None:
+                        resp = getattr(e, "response", None)
+                        if resp is not None:
+                            status = getattr(resp, "status_code", None)
+                    if status == 400 or "reasoning_effort" in err_msg or "parameter" in err_msg or "argument" in err_msg or "extra" in err_msg:
+                        _reasoning_effort_rejected = True
+                        call_kwargs.pop("reasoning_effort", None)
+                        raw_response = client.chat.completions.with_raw_response.create(**call_kwargs)
+                    else:
+                        raise
+                else:
+                    raise
+
+            _update_rate_info(attempt_model, raw_response.headers)
+            response = raw_response.parse()
+            choice = response.choices[0]
+            content = choice.message.content or ""
+            finish_reason = choice.finish_reason
+            completion_tokens = getattr(getattr(response, "usage", None), "completion_tokens", None)
+            print(f"[generate_text] model={attempt_model} finish={finish_reason} completion_tokens={completion_tokens}")
+
+            if content:
+                if model and attempt_model != model:
+                    print(f"[generate_text] Used fallback model {attempt_model} (primary returned empty)")
+                _last_finish_reason = finish_reason
+                return content, finish_reason
+
+            print(
+                f"[generate_text] {attempt_model} returned empty content, "
+                f"finish_reason={finish_reason} — trying next model"
+            )
+        except Exception as e:
+            resp = getattr(e, "response", None)
+            if resp is not None and hasattr(resp, "headers"):
+                _update_rate_info(attempt_model, resp.headers)
+            print(f"[generate_text] {attempt_model} raised {type(e).__name__}: {e} — trying next model")
+
+    raise LLMUnavailableError(
+        "All Groq models in the chain failed or returned empty content. "
+        f"Chain tried: {model_chain}"
+    )
+
+
 def generate_text(
     prompt: str,
     model: str | None = None,
     temperature: float = 0.2,
     max_tokens: int = 2048,
+    reasoning_effort: str | None = "low",
 ) -> str:
     """Send a text prompt to Groq and return the completion string.
 
@@ -170,9 +268,6 @@ def generate_text(
     chain returned by _get_active_model_chain(). If every attempt fails or returns
     empty content, raises LLMUnavailableError so callers can show a friendly
     message instead of a blank UI.
-
-    Captures Groq rate-limit headers via `with_raw_response` and enforces per-session
-    prompt limits from MAX_PROMPTS_PER_SESSION.
     """
     # ── Per-session prompt limit guard ────────────────────────────────────────
     try:
@@ -190,43 +285,86 @@ def generate_text(
     except Exception:
         pass
 
-    # Build chain: requested model first (if specified), then the rest of the active chain.
-    active_chain = _get_active_model_chain()
-    if model:
-        model_chain = [model] + [m for m in active_chain if m != model]
-    else:
-        model_chain = list(active_chain)
+    content, _ = _chat_once(
+        messages=[{"role": "user", "content": prompt}],
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        reasoning_effort=reasoning_effort,
+    )
+    return content
 
-    client = get_groq_client()
-    for attempt_model in model_chain:
+
+def generate_text_complete(
+    prompt: str,
+    model: str | None = None,
+    temperature: float = 0.2,
+    max_tokens: int = 4096,
+    max_continuations: int = 2,
+    reasoning_effort: str | None = "low",
+) -> str:
+    """Generate text and continue automatically if truncated by finish_reason == 'length'.
+
+    Does not increment prompts_used on continuations.
+    Returns the accumulated text as a string.
+    """
+    global _last_finish_reason
+
+    # Per-session prompt limit guard (counted ONCE per user action)
+    try:
+        from streamlit.runtime import exists as _st_runtime_exists
+        if _st_runtime_exists():
+            import streamlit as st
+            if "prompts_used" not in st.session_state:
+                st.session_state.prompts_used = 0
+            max_prompts = int(os.environ.get("MAX_PROMPTS_PER_SESSION", 25))
+            if st.session_state.prompts_used >= max_prompts:
+                msg = f"You have reached your session limit of {max_prompts} prompts. Please refresh the page to start a new session."
+                st.warning(f"⚠️ {msg}")
+                return msg
+            st.session_state.prompts_used += 1
+    except Exception:
+        pass
+
+    content, finish_reason = _chat_once(
+        messages=[{"role": "user", "content": prompt}],
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        reasoning_effort=reasoning_effort,
+    )
+    full_content = content
+    generate_text_complete.last_finish_reason = finish_reason
+
+    continuations = 0
+    while finish_reason == "length" and continuations < max_continuations:
+        messages = [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": full_content},
+            {"role": "user", "content": "Continue exactly where you stopped. Do not repeat anything and do not add an introduction."},
+        ]
         try:
-            raw_response = client.chat.completions.with_raw_response.create(
-                model=attempt_model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
+            next_content, next_finish = _chat_once(
+                messages=messages,
+                model=model,
                 max_tokens=max_tokens,
-            )
-            # Capture rate-limit headers under the model that was called
-            _update_rate_info(attempt_model, raw_response.headers)
-            response = raw_response.parse()
-            content = response.choices[0].message.content
-            finish_reason = response.choices[0].finish_reason
-            if content:
-                if model and attempt_model != model:
-                    print(f"[generate_text] Used fallback model {attempt_model} (primary returned empty)")
-                return content
-            # content is None or empty — try next
-            print(
-                f"[generate_text] {attempt_model} returned empty content, "
-                f"finish_reason={finish_reason} — trying next model"
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
             )
         except Exception as e:
-            resp = getattr(e, "response", None)
-            if resp is not None and hasattr(resp, "headers"):
-                _update_rate_info(attempt_model, resp.headers)
-            print(f"[generate_text] {attempt_model} raised {type(e).__name__}: {e} — trying next model")
+            print(f"[generate_text_complete] Continuation failed ({type(e).__name__}: {e}), returning partial content")
+            break
 
-    raise LLMUnavailableError(
-        "All Groq models in the chain failed or returned empty content. "
-        f"Chain tried: {model_chain}"
-    )
+        if not next_content or not next_content.strip():
+            break
+
+        full_content += next_content
+        finish_reason = next_finish
+        generate_text_complete.last_finish_reason = finish_reason
+        continuations += 1
+
+    _last_finish_reason = finish_reason
+    return full_content
+
+
+generate_text_complete.last_finish_reason = None

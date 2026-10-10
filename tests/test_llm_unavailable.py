@@ -28,7 +28,7 @@ def _always_raises(*args, **kwargs):
 # ── summary ───────────────────────────────────────────────────────────────────
 def test_summarize_paper_returns_friendly_msg_on_llm_error():
     from generation.summary import summarize_paper
-    with patch("generation.summary.generate_text", side_effect=_always_raises):
+    with patch("generation.summary.generate_text_complete", side_effect=_always_raises):
         result = summarize_paper(_PAPER)
     assert isinstance(result, str)
     assert len(result) > 10, "Expected a non-empty friendly message"

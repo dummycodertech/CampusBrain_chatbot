@@ -10,11 +10,6 @@ import re
 from collections import defaultdict
 from typing import Any, Dict, List, Tuple
 
-from generation.topic_heatmap import (
-    extract_marks,
-    split_into_questions,
-)
-
 
 def _year_num(y: Any) -> int:
     """Extract 4-digit integer year for sorting; defaults to 0 if not found."""
@@ -23,18 +18,33 @@ def _year_num(y: Any) -> int:
 
 
 def _extract_q_no(q_text: str, fallback_idx: int) -> str:
-    """Extract question label like 'Q1', '1.', '(a)', or fallback to 'Q{idx}'."""
-    m = re.match(
-        r"^\s*(?:Q\.?\s*(\d+[a-zA-Z]?)|(\d+[a-zA-Z]?)[.)]|\(([a-zA-Z\d]+)\)|([a-zA-Z])[.)])",
+    """Extract question label like 'Q1', 'Q1(a)', '(a)', or fallback to 'Q{idx}'.
+
+    Never returns malformed labels like 'Q(a'.
+    """
+    # 1. Main question with sub-part: Q1(a), 1(a), Q1. (a)
+    m_both = re.match(
+        r"^\s*Q\.?\s*(\d+)\s*[.\s]*\(([a-zA-Z])\)|^\s*(\d+)\s*[.\s]*\(([a-zA-Z])\)",
         q_text,
         re.IGNORECASE,
     )
-    if m:
-        # Return cleanly formatted label
-        clean_label = m.group(0).strip().rstrip(".)")
-        if not clean_label.upper().startswith("Q"):
-            clean_label = f"Q{clean_label}"
-        return clean_label
+    if m_both:
+        num = m_both.group(1) or m_both.group(3)
+        letter = (m_both.group(2) or m_both.group(4)).lower()
+        return f"Q{num}({letter})"
+
+    # 2. Sub-part only: (a), a), a.
+    m_sub = re.match(r"^\s*(?:\(([a-zA-Z])\)|([a-zA-Z])[.)])", q_text, re.IGNORECASE)
+    if m_sub:
+        letter = (m_sub.group(1) or m_sub.group(2)).lower()
+        return f"({letter})"
+
+    # 3. Main question only: Q1, Q.1, 1., 1)
+    m_main = re.match(r"^\s*(?:Q\.?\s*(\d+[a-zA-Z]?)|(\d+)[.)])", q_text, re.IGNORECASE)
+    if m_main:
+        num = m_main.group(1) or m_main.group(2)
+        return f"Q{num}"
+
     return f"Q{fallback_idx}"
 
 
@@ -126,6 +136,8 @@ def top_topics_from_rows(
 
         for idx, r in enumerate(rows, start=1):
             topic = (r.get("topic") or "Uncategorized").strip()
+            if topic in ("Uncategorized", "Other"):
+                continue
             marks = r.get("marks", 0) or 0
             q_no = r.get("q_no") or _extract_q_no(r.get("text", ""), idx)
             clean_text = _clean_question_text(r.get("text", ""))

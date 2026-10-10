@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import html
 import re
-from typing import Any, Optional, Tuple
+from typing import Optional, Tuple
 import streamlit as st
 from router.intent_router import route_intent
 from generation.qa import answer_question, knowledge_answer
@@ -58,14 +58,7 @@ def render_chat_box(paper_text: str) -> None:
     # Empty state
     if not st.session_state.messages:
         st.markdown(
-            """
-            <div style="text-align:center; padding: 3rem 0; color: #3f3f46;">
-                <div style="font-size: 2rem; margin-bottom: 0.5rem;">✦</div>
-                <div style="font-size: 0.9rem; letter-spacing: 1px; text-transform: uppercase;">
-                    Ask anything about this paper
-                </div>
-            </div>
-            """,
+            '<div style="text-align:center; padding: 3rem 0; color: #3f3f46;"><div style="font-size: 2rem; margin-bottom: 0.5rem;">✦</div><div style="font-size: 0.9rem; letter-spacing: 1px; text-transform: uppercase;">Ask anything about this paper</div></div>',
             unsafe_allow_html=True,
         )
 
@@ -186,62 +179,27 @@ def _render_quiz(quiz_data: dict, msg_idx: int = 0, paper_text: str = "") -> Non
             is_correct = q_state["results"].get(q_idx, False)
             correct_ans = q.get("correct_answer", "")
             explanation = q.get("explanation", "")
-            correct_ans_esc = html.escape(str(correct_ans))
-            explanation_esc = html.escape(str(explanation)) if explanation else ""
 
             if is_correct:
-                st.markdown(
-                    f"""<div style="margin-top:0.4rem; padding: 0.6rem 0.9rem;
-                        background: rgba(16, 185, 129, 0.12); border-left: 3px solid #10b981;
-                        border-radius: 6px; color: #6ee7b7; font-size: 0.92rem;">
-                        ✅ <strong>Correct!</strong> &nbsp;{correct_ans_esc}
-                        {f"<div style='margin-top:0.3rem; color:#a7f3d0;'>💡 {explanation_esc}</div>" if explanation_esc else ""}
-                    </div>""",
-                    unsafe_allow_html=True,
-                )
+                st.success(f"**Correct!** {correct_ans}")
             else:
-                st.markdown(
-                    f"""<div style="margin-top:0.4rem; padding: 0.6rem 0.9rem;
-                        background: rgba(239, 68, 68, 0.12); border-left: 3px solid #ef4444;
-                        border-radius: 6px; color: #fca5a5; font-size: 0.92rem;">
-                        ❌ <strong>Incorrect.</strong> &nbsp;Correct answer: <strong>{correct_ans_esc}</strong>
-                        {f"<div style='margin-top:0.3rem; color:#fecaca;'>💡 {explanation_esc}</div>" if explanation_esc else ""}
-                    </div>""",
-                    unsafe_allow_html=True,
-                )
+                st.error(f"**Incorrect.** Correct answer: **{correct_ans}**")
+            if explanation:
+                st.caption(f"💡 {explanation}")
 
         st.markdown("<div style='margin-bottom: 0.7rem;'></div>", unsafe_allow_html=True)
 
     # 5. Final summary when all questions are answered
     if answered_count == total and total > 0:
         pct = int(round(correct_count / total * 100))
-        if pct == 100:
-            badge_icon = "🏆"
-            perf = "Perfect score! Outstanding mastery of these topics."
-        elif pct >= 70:
-            badge_icon = "🎉"
-            perf = "Great job! Strong understanding of the core concepts."
+        st.metric(label="Final Score", value=f"{correct_count} / {total}", delta=f"{pct}%")
+        if pct >= 70:
+            msg = "🏆 **100%** — Perfect score! Outstanding mastery of these topics." if pct == 100 else f"🎉 **{pct}%** — Great job! Strong understanding of the core concepts."
+            st.success(msg)
         elif pct >= 40:
-            badge_icon = "📚"
-            perf = "Good effort! Revise the missed topics before the exam."
+            st.info(f"📚 **{pct}%** — Good effort! Revise the missed topics before the exam.")
         else:
-            badge_icon = "💪"
-            perf = "Keep practicing! Review the explanations and retry."
-
-        st.markdown(
-            f"""<div style="margin-top:1rem; padding: 1rem 1.2rem;
-                background: rgba(124, 58, 237, 0.15); border: 1px solid rgba(167, 139, 250, 0.3);
-                border-radius: 10px; text-align: center;">
-                <div style="font-size: 1.5rem; margin-bottom: 0.3rem;">{badge_icon}</div>
-                <div style="font-size: 1.15rem; font-weight: 700; color: #c4b5fd;">
-                    Final Summary: {correct_count} / {total} ({pct}%)
-                </div>
-                <div style="color: #d4d4d8; font-size: 0.9rem; margin-top: 0.4rem;">
-                    {html.escape(str(perf))}
-                </div>
-            </div>""",
-            unsafe_allow_html=True,
-        )
+            st.warning(f"💪 **{pct}%** — Keep practicing! Review the explanations and retry.")
 
 
 def _render_flashcards(cards_data: dict) -> None:
@@ -259,15 +217,8 @@ def _render_flashcards(cards_data: dict) -> None:
     )
     for i, card in enumerate(cards, start=1):
         with st.expander(f"Card {i}:  {card['term']}", expanded=(i == 1)):
+            def_esc = html.escape(str(card.get('definition', '')))
             st.markdown(
-                f"""<div style="padding: 0.9rem 1rem;
-                    background: rgba(124,58,237,0.08);
-                    border-left: 2px solid #a78bfa;
-                    border-radius: 8px;
-                    color: #e4e4e7;
-                    line-height: 1.65;
-                    font-size: 0.95rem;">
-                    {html.escape(str(card['definition']))}
-                </div>""",
+                f'<div style="padding: 0.9rem 1rem; background: rgba(124,58,237,0.08); border-left: 2px solid #a78bfa; border-radius: 8px; color: #e4e4e7; line-height: 1.65; font-size: 0.95rem;">{def_esc}</div>',
                 unsafe_allow_html=True,
             )

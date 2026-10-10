@@ -1,249 +1,164 @@
 # 🧠 Campus Brain — PYQ AI Study Assistant
 
-> **AI-powered Previous Year Question (PYQ) study assistant** built with Streamlit, Tesseract OCR, and Groq.  
-> Drop any exam paper — scanned or digital — and get instant summaries, practice quizzes, flashcards, and grounded answers on demand.
-
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://campusbrain.streamlit.app)
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
+Campus Brain is an AI-powered study assistant for university Previous Year Question (PYQ) papers that converts raw exam PDFs into interactive revision materials. It can be used in two ways:
+1. **Embedded in a PYQ website** via an `<iframe>` receiving paper parameters in the query string.
+2. **Standalone web app** with direct drag-and-drop PDF upload on the landing page.
 
 ---
 
 ## ✨ Features
 
-| Feature | Description |
-|---|---|
-| 📄 **Smart PDF Ingestion** | Intelligent pipeline: direct text extraction → local Tesseract OCR (with multi-PSM retry and image preprocessing). Zero external API cost. |
-| 🗺️ **Subject Tagging** | Automatically detects and tags each page to its subject using regex header matching + configurable semester curricula |
-| 💬 **Two-path Q&A** | Concept questions → LLM knowledge base; paper-specific questions → grounded in extracted text |
-| 📝 **Summarize** | One-click paper summary highlighting key topics and section weights |
-| 🧪 **Quiz Generator** | Strict JSON-schema multiple-choice quiz — regenerates fresh questions each time |
-| 🃏 **Flashcard Generator** | Auto-generated topic flashcards for rapid revision |
-| 📊 **Topic Ranker** | Cross-year frequency analysis showing which topics appear most in past exams |
-| 🌐 **Zero-backend integration** | Embeds into any website via `<iframe>` or `<a>` link — no API calls back to the host site |
-| 📤 **Local Upload** | Drag-and-drop any PDF directly from the landing page without website integration |
-| 🌍 **Web Search** | Tavily-powered web search for questions that need up-to-date information beyond the paper |
+- **Smart PDF Ingestion**: PyMuPDF direct text extraction with fallback to local Tesseract OCR (with preprocessing) for scanned pages.
+- **Subject Detection**: Automatic header and curriculum matching to identify subject and semester.
+- **Study Aids**: Instant paper summaries, interactive 5-question MCQ quizzes, and flashcards.
+- **Topic Heatmap & Top 5**: AI-tagged topics (saved once per paper), frequency heatmaps, and Top 5 recurring exam topics with marks and past questions.
+- **Exam Predictor**: Heuristic analysis calculating topic probability scores and identifying repeated questions across years.
+- **Mock Paper Generator**: Builds balanced practice papers weighted by topic frequency, with printable PDF export.
+- **Answer Checker & Web Q&A**: Evaluates student answers with marking schemes; answers syllabus questions with optional Tavily web search.
+- **Safety & Guardrails**: Off-topic prompt detection, SSRF-safe PDF URL fetching, prompt-injection shielding, and shared Groq rate-limit tracking.
+- **Caching**: Local SQLite caching for extracted text, LLM outputs, and topic tags so duplicate calls are avoided.
+
+---
+
+## 🛡️ Protecting Free API Quota
+
+To operate reliably within free API tiers:
+1. **Lazy Once-Per-Paper Tagging**: Question topics are tagged on demand and permanently cached in SQLite.
+2. **Inherited Topics**: Identical questions across paper years inherit existing topic tags without calling the LLM.
+3. **Cheaper Tagging Model**: Topic tagging defaults to `TAGGING_MODEL` (`openai/gpt-oss-20b`).
+4. **Daily Budget & Batch Limits**: `TAGGING_DAILY_BUDGET` caps daily tagging calls; `TAG_MAX_PER_CLICK` limits batch tagging per action.
+5. **Pre-call Quota Checks**: `quota_ok()` aborts background requests before making Groq calls if rate limits are exhausted.
+6. **No Poisoned Cache**: Unsuccessful or fallback responses are never stored in the database.
+7. **Session Limits**: `MAX_PROMPTS_PER_SESSION` applies a soft prompt counter per student session.
 
 ---
 
 ## 🏗️ Architecture
 
-### OCR Pipeline (no quota, no API key required)
-
+```mermaid
+flowchart TD
+    A[PDF Input: URL or Upload] --> B[PyMuPDF Direct Text]
+    B -->|≥ 80 chars| C[Extracted Text]
+    B -->|< 80 chars| D[Tesseract OCR 300 DPI]
+    D --> C
+    C --> E[SQLite CacheStore]
+    E --> F[Intent Router]
+    F --> G[Groq LLM Fallback Chain]
+    F --> H[Tavily Web Search]
+    G --> I[Summary / Quiz / Flashcards / Topics / Mock Paper]
 ```
-PDF uploaded
-    │
-    ▼
-PyMuPDF — direct text extraction
-    │
-    ├── ≥ 80 chars extracted?  →  Text page ✅  (free, instant)
-    │
-    └── < 80 chars (scanned page)
-            │
-            ▼
-        Preprocess (Grayscale → Autocontrast → Median Filter → Threshold)
-            │
-            ▼
-        Tesseract OCR (300 DPI, multi-PSM retry: 6 → 4 → 3)
-            │
-            └── Done ✅  (zero API cost, line reconstructed)
-```
-
-**Result:** Fast, local, memory-safe OCR ingestion running on Tesseract with zero external API quota consumed.
-
-### Text Generation Pipeline
-
-```
-Extracted text
-    │
-    └── Groq LLM (openai/gpt-oss-120b)
-            ├── Q&A  (two-path: knowledge vs. paper-grounded)
-            ├── Summary
-            ├── Quiz  (strict JSON schema)
-            ├── Flashcards
-            └── Topic Ranking
-```
-
-### Project Structure
 
 ```
 campus-brain/
-├── app.py                        # Streamlit entrypoint (URL-param + local-upload modes)
-├── packages.txt                  # System dependencies for Streamlit Cloud (tesseract-ocr)
-├── requirements.txt              # Python dependencies
-│
-├── ingestion/
-│   ├── pdf_to_images.py          # Hybrid PyMuPDF extraction + image rendering
-│   ├── ocr_tagger.py             # Tesseract OCR pipeline with line reconstruction & subject tagging
-│   ├── cache_writer.py           # Ingestion orchestrator — idempotent, SQLite-backed
-│   └── subject_reference.py      # Loads expected subject list for a branch/semester
-│
-├── storage/
-│   └── cache_store.py            # SQLite cache — only stores pages with real extracted text
-│
-├── retrieval/
-│   ├── paper_lookup.py           # Fetch full text for a paperId
-│   └── subject_lookup.py         # Cross-paper lookup by subject name
-│
-├── generation/
-│   ├── qa.py                     # Two-path Q&A (knowledge vs. paper-grounded)
-│   ├── summary.py                # Paper summarizer
-│   ├── quiz.py                   # Quiz generator (strict JSON schema)
-│   ├── flashcards.py             # Flashcard generator
-│   └── topic_ranker.py           # Cross-year topic frequency ranking
-│
-├── router/
-│   └── intent_router.py          # Keyword-based intent detection for the chat interface
-│
-├── services/
-│   ├── llm_client.py             # Groq text wrapper with fallback model chain
-│   └── web_search.py             # Tavily web search integration
-│
-├── components/
-│   ├── theme.py                  # Premium dark CSS + aurora animations
-│   ├── action_buttons.py         # Summarize / Quiz / Flashcards / Topic Rank buttons
-│   └── chat_box.py               # Chat UI with intent routing
-│
-└── data/
-    └── subjects_by_semester.json # Curriculum reference (branch-semester → subjects)
+├── app.py                     # Main Streamlit app entrypoint
+├── packages.txt               # OS packages for Streamlit Cloud (tesseract-ocr)
+├── requirements.txt           # Python dependencies
+├── components/                # UI widgets (action buttons, chat box, theme, meter)
+├── data/                      # Curriculum subject mappings
+├── generation/                # LLM & heuristic generation modules
+├── ingestion/                 # PDF extraction, OCR, validation, safe fetching
+├── retrieval/                 # SQLite-backed paper and subject lookups
+├── router/                    # Chat intent routing
+├── services/                  # Groq client with fallback chain and Tavily search
+├── storage/                   # SQLite cache store
+├── tests/                     # Automated pytest suite
+└── tools/                     # Maintenance utilities
 ```
 
 ---
 
-## ⚡ Quick Start
+## 🔗 URL Contract
 
-### Prerequisites
-
-- Python 3.10+
-- [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) installed locally
-- A [Groq API key](https://console.groq.com/) — free tier works
-
-### Install Tesseract
-
-```bash
-# Ubuntu / Debian / Streamlit Cloud
-sudo apt-get install tesseract-ocr
-
-# macOS
-brew install tesseract
-
-# Windows — download installer from:
-# https://github.com/UB-Mannheim/tesseract/wiki
-```
-
-### Setup
-
-```bash
-# 1. Clone the repo
-git clone https://github.com/dummycodertech/CampusBrain_chatbot.git
-cd CampusBrain_chatbot
-
-# 2. Create and activate a virtual environment
-python -m venv venv
-source venv/bin/activate        # macOS / Linux
-venv\Scripts\activate           # Windows
-
-# 3. Install Python dependencies
-pip install -r requirements.txt
-
-# 4. Configure environment variables
-# Create a .env file with:
-GROQ_API_KEY="gsk_..."
-TAVILY_API_KEY="tvly-..."          # optional — enables web search
-
-# 5. Run the app
-streamlit run app.py
-```
-
----
-
-## 🔌 Website Integration
-
-The website passes everything the app needs via URL query params.  
-**This app never calls back into the website's backend at runtime.**
-
-### Query string format
-
-```
-?paperId=<unique-id>
- &pdfUrl=<public-PDF-URL>
- &subject=<subject-name>
- &year=<year>
- &branch=<branch>           # e.g. IT, CS, MECH
- &semester=<semester>       # e.g. 3, 5, 7
-```
-
-### Embed as iframe
+When embedding Campus Brain in a PYQ website via iframe:
+- **`paperId`** *(required)*: Unique identifier for the paper.
+- **`pdfUrl`** *(required)*: Public URL to download the PDF.
+- **`subject`** *(optional)*: Subject name (e.g. `Operating Systems`).
+- **`year`** *(optional)*: Exam year (e.g. `2023`).
+- **`branch`** *(optional)*: Engineering branch (e.g. `CSE`).
+- **`semester`** *(optional)*: Semester number (e.g. `5`).
 
 ```html
 <iframe
-  src="https://<app-url>/?paperId=cs5-ds-2024&pdfUrl=https://cdn.example.com/paper.pdf&subject=Data+Structures&year=2024&branch=CS&semester=5"
+  src="https://campusbrain.streamlit.app/?paperId=cs501_2023&pdfUrl=https://example.com/cs501.pdf&subject=Operating%20Systems&year=2023"
   width="100%"
-  height="800"
+  height="850"
   frameborder="0">
 </iframe>
 ```
 
-### Hyperlink fallback
-
-```html
-<a href="https://<app-url>/?paperId=...&pdfUrl=...&subject=...&year=..."
-   target="_blank">Open AI Assistant</a>
-```
-
-> **⚠️ Breaking change warning**: if either side renames `paperId`, `pdfUrl`, `subject`, or `year`, the other breaks silently. Coordinate before renaming.
+> ⚠️ **WARNING**: Do NOT rename any URL parameter keys (`paperId`, `pdfUrl`, `subject`, `year`, `branch`, `semester`). Embedding host sites rely strictly on this parameter contract.
 
 ---
 
-## 📚 Subject Reference (`data/subjects_by_semester.json`)
+## 🚀 Setup & Installation
 
-PYQ PDFs are semester-wide bundles mixing several subjects. Ingestion needs the full expected subject list for the bundle to correctly tag pages.
-
-```json
-{
-  "IT-3": ["Data Structures", "Digital Electronics", "Object Oriented Programming", "..."],
-  "CS-5": ["Operating Systems", "Computer Networks", "Database Management Systems", "..."]
-}
+### 1. Clone & Dependencies
+```bash
+git clone https://github.com/dummycodertech/CampusBrain_chatbot.git
+cd pyq-assistant
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-- Key format: `"<branch>-<semester>"` (e.g. `"IT-3"`)
-- `ingest_paper` looks it up automatically via `branch`/`semester` query params
-- If a branch+semester is not mapped, tagging falls back to open-ended header detection
+### 2. Install Tesseract OCR
+- **Windows**: Install via [UB-Mannheim Tesseract installer](https://github.com/UB-Mannheim/tesseract/wiki) and add install directory to system `PATH`.
+- **macOS**: `brew install tesseract`
+- **Ubuntu/Debian**: `sudo apt-get install -y tesseract-ocr tesseract-ocr-eng`
+
+### 3. Configure Secrets
+Create `.env` (or `.streamlit/secrets.toml` from `.streamlit/secrets.toml.example`):
+```bash
+cp .streamlit/secrets.toml.example .env
+```
+Fill in your `GROQ_API_KEY`.
+
+### 4. Run Locally & Test
+```bash
+streamlit run app.py
+pytest -q
+```
 
 ---
 
-## 🚀 Deployment (Streamlit Cloud)
+## ⚙️ Environment Variables
 
-1. Push to GitHub
-2. Connect to [share.streamlit.io](https://share.streamlit.io)
-3. Streamlit Cloud will auto-install `tesseract-ocr` from `packages.txt` — no manual setup needed
-4. Add secrets in **App Settings → Secrets**:
-
-```toml
-GROQ_API_KEY = "gsk_..."
-TAVILY_API_KEY = "tvly-..."          # optional
-```
-
-5. Deploy — app is publicly accessible at `https://<your-app>.streamlit.app`
-
-> **Note:** The SQLite cache lives on Streamlit Cloud's ephemeral filesystem and resets on each redeploy. Users will need to re-process PDFs after a new deployment. For production persistence, migrate `cache_store.py` to an external database (Supabase, PlanetScale, etc.).
-
----
-
-## 🛠️ Tech Stack
-
-| Layer | Technology | Notes |
+| Variable | Default | Description |
 |---|---|---|
-| UI Framework | Streamlit 1.38 | |
-| PDF Parsing | PyMuPDF (fitz) | Text extraction + image rendering |
-| OCR | **Tesseract OCR** + pytesseract | Free, local, no quota |
-| Text Generation | Groq — `openai/gpt-oss-120b` | With `gpt-oss-20b` + `qwen3.8-27b` fallback chain |
-| Web Search | Tavily | Optional |
-| Cache / Storage | SQLite (`sqlite3`) | Only stores pages with real extracted text |
-| Styling | Custom CSS | Inter font, glassmorphism, aurora gradient animations |
+| `GROQ_API_KEY` | *(required)* | Groq API key for LLM generation |
+| `TAVILY_API_KEY` | `""` | Optional Tavily key for live web search |
+| `TAVILY_DEPTH` | `"basic"` | Search depth: `"basic"` or `"advanced"` |
+| `MAX_PROMPTS_PER_SESSION` | `"25"` | Soft prompt limit per session |
+| `ALLOWED_PDF_HOSTS` | `""` | Comma-separated allowed hostnames for `pdfUrl` |
+| `GROQ_MODEL_CHAIN` | `""` | Fallback models (default: `openai/gpt-oss-120b,openai/gpt-oss-20b`) |
+| `TAGGING_MODEL` | `"openai/gpt-oss-20b"` | Groq model used for topic tagging questions |
+| `TAGGING_DAILY_BUDGET` | `"40"` | Max question-tagging calls allowed per calendar day |
+| `TAG_MAX_PER_CLICK` | `"3"` | Max untagged papers processed per click |
 
 ---
 
-## 📄 License
+## ☁️ Deploying to Streamlit Community Cloud
 
-MIT — see [LICENSE](LICENSE) for details.
+1. Push code to GitHub.
+2. In Streamlit Cloud, create an app pointing to `app.py`.
+3. Under **Advanced settings**, ensure Python version is 3.10+.
+4. Paste secrets into the **Secrets** modal formatted as TOML with quoted string values (refer to `.streamlit/secrets.toml.example`).
+5. Verify deployment in Cloud logs by checking for `[app]` startup status lines:
+   - `[app] Tesseract binary: found`
+   - `[app] Active Groq model chain: ...`
+   - `[app] GROQ_API_KEY set: yes`
+   - `[app] Storage: local SQLite (cleared on redeploy/restart)`
+
+---
+
+## ⚠️ Known Limitations
+
+- **Local Storage**: `storage/cache.db` resides on local disk and is cleared upon restart or redeployment on Streamlit Cloud, requiring re-ingestion of papers on cold runs.
+- **Soft Session Limit**: The prompt count cap resets if the user refreshes their browser.
+- **Shared Quota**: Groq rate limits are shared among all active users on the deployed instance.
+- **Scanned PDF Processing**: Image preprocessing and OCR on multi-page scanned papers takes noticeably longer on initial ingestion and OCR quality varies with scan clarity.
+- **Topic & Question Extraction**: Heuristic regex splitting may occasionally segment messy formatting imperfectly, affecting topic breakdown accuracy.
+- **Heuristic Predictions & Mock Papers**: Exam predictions and mock papers use statistical topic weighting and require papers from multiple years of the same subject.
+- **Iframe Third-Party Cookies**: Direct file uploads inside third-party iframes may fail in browsers that block third-party cookies (URL parameter mode is unaffected).
+- **Branch Disambiguation**: Re-uploading an identical PDF hash under a different branch reuses the previously cached entry.
+- **Testing Scope**: Only core extraction, caching, and fallback paths covered under `tests/` are verified with automated test suites; heuristic generators are rule-based.

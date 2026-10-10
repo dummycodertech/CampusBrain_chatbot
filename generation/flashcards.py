@@ -112,7 +112,7 @@ def generate_flashcards(paper_text: str, paper_id: str = "", bypass_cache: bool 
             return cached
 
     try:
-        raw = generate_text(FLASHCARD_PROMPT.format(paper_text=paper_text), temperature=0.3)
+        raw = generate_text(FLASHCARD_PROMPT.format(paper_text=paper_text), temperature=0.3, max_tokens=4000)
     except LLMUnavailableError:
         return {"flashcards": [{
             "term": "⚠️ AI Unavailable",

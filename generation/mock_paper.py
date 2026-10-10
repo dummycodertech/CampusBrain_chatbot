@@ -1,4 +1,4 @@
-﻿"""
+"""
 Mock paper generator for Campus Brain.
 
 Builds a practice paper from real past questions weighted by topic frequency.
@@ -64,8 +64,23 @@ def _build_pool(
                 "year": year_str,
             })
 
+    has_real = any(q["topic"] not in _SKIP_TOPICS for q in pool)
+    if has_real:
+        pool = [q for q in pool if q["topic"] not in _SKIP_TOPICS]
+
     sorted_years = sorted(years_seen, key=_year_num, reverse=True)
     return pool, sorted_years
+
+
+def _strip_trailing_marks(text: str) -> str:
+    """Strip leftover trailing '[n]' or '(n)' or '[nM]' or '(n marks)'."""
+    t = text.strip()
+    return re.sub(
+        r"\s*(?:\[|\()\s*\d{1,2}\s*(?:marks?|m)?\s*(?:\]|\))\s*$",
+        "",
+        t,
+        flags=re.IGNORECASE,
+    ).strip()
 
 
 def _compute_topic_weights(
@@ -196,7 +211,7 @@ def build_mock_paper(
 
                 questions_out.append({
                     "n": len(questions_out) + 1,
-                    "text": chosen_q["text"],
+                    "text": _strip_trailing_marks(chosen_q["text"]),
                     "topic": chosen_q["topic"],
                     "year": chosen_q["year"],
                     "marks": slot_marks,
@@ -232,7 +247,7 @@ def to_text(paper: Dict[str, Any], title: str = "Mock Paper") -> str:
         lines.append(f"--- {sec['section']} ({sec['marks']} marks each) ---")
         for q in sec.get("questions", []):
             adj = "  [marks adjusted]" if q.get("adjusted") else ""
-            lines.append(f"Q{q['n']}. {q['text']}  [{q['marks']} marks]{adj}")
+            lines.append(f"Q{q['n']}. {_strip_trailing_marks(q['text'])}  [{q['marks']} marks]{adj}")
         lines.append("")
     return "\n".join(lines)
 
@@ -286,7 +301,7 @@ def to_pdf_bytes(paper: Dict[str, Any], title: str = "Mock Paper") -> bytes:
         ))
         for q in sec.get("questions", []):
             story.append(Paragraph(
-                f"<b>Q{global_n}.</b> {escape(q['text'])} <i>[{q['marks']} marks]</i>",
+                f"<b>Q{global_n}.</b> {escape(_strip_trailing_marks(q['text']))} <i>[{q['marks']} marks]</i>",
                 style_q,
             ))
             global_n += 1

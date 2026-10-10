@@ -28,8 +28,8 @@ stays constant regardless of document length.
 from __future__ import annotations
 
 import re
-from collections import defaultdict, OrderedDict
-from typing import Dict, Iterable, Iterator, List, Optional, Tuple
+from collections import OrderedDict
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from PIL import Image, ImageFilter, ImageOps
 

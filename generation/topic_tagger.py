@@ -15,12 +15,11 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from generation.json_utils import extract_json
-from generation.topic_heatmap import extract_marks, split_into_questions
-from generation.topic_questions import _extract_q_no
-from services.llm_client import LLMUnavailableError, generate_text, quota_ok
+from generation.question_prep import prepare_questions
+from services.llm_client import LLMUnavailableError, generate_text, quota_ok, get_last_finish_reason
 from storage.cache_store import CacheStore
 
-PROMPT_VERSION = "topics-v1"
+PROMPT_VERSION = "topics-v2"
 TAGGING_MODEL = os.environ.get("TAGGING_MODEL", "").strip() or "openai/gpt-oss-20b"
 DAILY_BUDGET = int(os.environ.get("TAGGING_DAILY_BUDGET", "40").strip() or 40)
 
@@ -89,24 +88,17 @@ def tag_paper_topics(
     if not bypass_cache and store.has_topic_map(paper_id, sub):
         return store.get_topic_map(paper_id, sub), True
 
-    # b. Split into questions and drop chunks under 15 characters
-    raw_chunks = split_into_questions(text or "")
+    # b. Prepare questions using question_prep
+    prep_questions = prepare_questions(text or "")
     rows: List[Dict[str, Any]] = []
-    q_idx = 1
-    for chunk in raw_chunks:
-        collapsed = " ".join(chunk.split())
-        if len(collapsed) < 15:
-            continue
-        q_no = _extract_q_no(chunk, q_idx)
-        marks = extract_marks(chunk)
+    for q_idx, q in enumerate(prep_questions, start=1):
         rows.append({
             "q_idx": q_idx,
-            "q_no": q_no,
-            "marks": marks,
-            "text": collapsed,
+            "q_no": q["q_no"],
+            "marks": q["marks"],
+            "text": q["text"],
             "topic": "",
         })
-        q_idx += 1
 
     if not rows:
         return [], False
@@ -153,16 +145,18 @@ def tag_paper_topics(
 
     # e. BUDGET CHECKS before calling LLM
     if store.get_usage("tagging") >= DAILY_BUDGET:
+        print(f"[tagger] Blocked by daily budget check: usage={store.get_usage('tagging')}/{DAILY_BUDGET}")
         _notices[paper_id] = "daily AI topic budget reached"
         return _apply_fallback()
 
     if not quota_ok(TAGGING_MODEL):
+        print(f"[tagger] Blocked by quota check: quota low for model {TAGGING_MODEL}")
         _notices[paper_id] = "AI quota is low right now"
         return _apply_fallback()
 
-    # f. LLM Tagging in chunks of 50
+    # f. LLM Tagging in chunks of 30
     produced_labels: List[str] = []
-    chunk_size = 50
+    chunk_size = 30
 
     for i in range(0, len(pending_rows), chunk_size):
         chunk = pending_rows[i:i + chunk_size]
@@ -186,25 +180,37 @@ def tag_paper_topics(
         )
 
         try:
-            resp = generate_text(prompt, model=TAGGING_MODEL, temperature=0.0, max_tokens=800)
+            resp = generate_text(prompt, model=TAGGING_MODEL, temperature=0.0, max_tokens=3000)
             store.bump_usage("tagging")
+        except LLMUnavailableError:
+            _notices[paper_id] = "the AI is unavailable"
+            return _apply_fallback()
+        except Exception as e:
+            print(f"[tagger] LLM call failed ({type(e).__name__}: {e})")
+            _notices[paper_id] = "the AI is unavailable"
+            return _apply_fallback()
+
+        try:
             parsed = extract_json(resp)
             if not isinstance(parsed, dict):
                 raise ValueError(f"Expected JSON dictionary from model, got: {type(parsed).__name__}")
-
-            for r in chunk:
-                q_key = str(r["q_idx"])
-                val = parsed.get(q_key)
-                if val and str(val).strip():
-                    norm_label = normalize_label(str(val), current_known)
-                    r["topic"] = norm_label or "Other"
-                    if norm_label and norm_label not in ("Other", "Uncategorized") and norm_label not in produced_labels:
-                        produced_labels.append(norm_label)
-                else:
-                    r["topic"] = "Other"
-        except (LLMUnavailableError, Exception):
-            _notices[paper_id] = "AI topic detection is unavailable right now"
+        except Exception:
+            finish = get_last_finish_reason()
+            raw_start = (resp or "")[:120].replace("\r", " ").replace("\n", " ")
+            print(f"[tagger] parse failure finish={finish} raw_start={raw_start}")
+            _notices[paper_id] = "the AI returned an unreadable answer"
             return _apply_fallback()
+
+        for r in chunk:
+            q_key = str(r["q_idx"])
+            val = parsed.get(q_key)
+            if val and str(val).strip():
+                norm_label = normalize_label(str(val), current_known)
+                r["topic"] = norm_label or "Other"
+                if norm_label and norm_label not in ("Other", "Uncategorized") and norm_label not in produced_labels:
+                    produced_labels.append(norm_label)
+            else:
+                r["topic"] = "Other"
 
     # h. All chunks succeeded: save topic map and return
     store.save_topic_map(paper_id, sub, rows)

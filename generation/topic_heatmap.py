@@ -64,6 +64,8 @@ def build_heatmap_from_rows(rows: list) -> dict:
 
     for r in rows:
         top = (r.get("topic") or "Uncategorized").strip()
+        if top in ("Uncategorized", "Other"):
+            continue
         topic_counts[top] += 1
         m = r.get("marks", 0) or 0
         if m > 0:

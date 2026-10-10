@@ -1,11 +1,13 @@
 .env
+.streamlit/secrets.toml
+storage/*.db*
 venv/
 __pycache__/
 *.pyc
-storage/cache.db
-.streamlit/secrets.toml
-checkpoints.db
 *.png
+checkpoints.db
+.pytest_cache/
+REVIEW_*.md
 
 # Local Vector Database & Index files (Strictly Local)
 chroma_db/
@@ -13,4 +15,3 @@ chroma_db/
 faiss_index/
 storage/chroma_db/
 storage/*.index
-

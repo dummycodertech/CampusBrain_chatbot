@@ -10,7 +10,7 @@ import re
 import sqlite3
 import time
 from pathlib import Path
-from typing import Optional, List, Tuple, Any
+from typing import Optional, List, Tuple, Any, Dict
 
 DB_PATH = Path(__file__).parent / "cache.db"
 
