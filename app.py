@@ -84,7 +84,7 @@ st.set_page_config(
     page_title="Campus Brain",
     page_icon="🧠",
     layout="centered",
-    initial_sidebar_state="auto",
+    initial_sidebar_state="collapsed",
 )
 
 if not _groq_key_set:
@@ -193,6 +193,7 @@ if not paper_id or not pdf_url:
     st.markdown('</div>', unsafe_allow_html=True)
 
     if not uploaded_file:
+        render_usage_meter()
         st.stop()
 
     if is_other and not typed_subject.strip():
@@ -223,6 +224,7 @@ if not paper_id or not pdf_url:
 # responses from a previous paper don't bleed into the new one.
 if "messages" not in st.session_state or st.session_state.get("current_paper_id") != paper_id:
     st.session_state.messages = []
+    st.session_state.prompts_used = 0
     st.session_state.current_paper_id = paper_id
 
 # ─── Paper header ─────────────────────────────────────────────

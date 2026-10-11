@@ -68,6 +68,9 @@ def render_chat_box(paper_text: str) -> None:
         return
 
     st.session_state.messages.append({"role": "user", "content": question, "type": "text"})
+    if "prompts_used" not in st.session_state:
+        st.session_state.prompts_used = 0
+    st.session_state.prompts_used += 1
 
     intent = route_intent(question, paper_text=paper_text)
     scope = None

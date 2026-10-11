@@ -695,6 +695,7 @@ def render_action_buttons(paper_text: str, subject: str = "") -> None:
     with r4_col3:
         if st.button("🗑 Clear Chat", use_container_width=True):
             st.session_state.messages = []
+            st.session_state.prompts_used = 0
             st.session_state.show_heatmap = False
             st.session_state.show_top_topics = False
             st.session_state.show_predictor = False

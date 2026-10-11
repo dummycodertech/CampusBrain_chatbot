@@ -33,10 +33,14 @@ html, body, #root, [data-testid="stApp"],
     color: #f5f5f5 !important;
 }
 
-/* hide streamlit chrome */
+/* hide streamlit chrome & sidebar drawer */
 [data-testid="stHeader"],
 [data-testid="stToolbar"],
 [data-testid="stDecoration"],
+[data-testid="stSidebar"],
+[data-testid="collapsedControl"],
+[data-testid="stSidebarCollapseButton"],
+section[data-testid="stSidebar"],
 footer,
 #MainMenu { display: none !important; }
 
@@ -319,40 +323,239 @@ footer,
     cursor: not-allowed !important;
 }
 
-/* ─── Quota Meter Card ───────────────────────────────────── */
-.quota-card {
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 12px;
-    padding: 0.75rem 0.85rem;
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    margin-bottom: 0.8rem;
-    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+/* ─── Quota Floater Button & Dropdown ─────────────────────── */
+.quota-floater-root {
+    position: fixed;
+    top: 1.15rem;
+    right: 1.5rem;
+    z-index: 99999;
+    user-select: none;
+    font-family: 'Inter', sans-serif !important;
 }
-.quota-card.warn-state {
+
+.quota-floater-details {
+    position: relative;
+}
+
+.quota-floater-details summary {
+    list-style: none;
+    outline: none;
+}
+
+.quota-floater-details summary::-webkit-details-marker {
+    display: none;
+}
+
+.quota-floater-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.42rem 0.85rem;
+    background: rgba(18, 18, 24, 0.82);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 999px;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4), 0 0 12px rgba(124, 58, 237, 0.12);
+    transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+    color: #f4f4f5;
+    font-size: 0.78rem;
+    font-weight: 500;
+}
+
+.quota-floater-btn:hover,
+.quota-floater-details[open] .quota-floater-btn {
+    background: rgba(28, 28, 38, 0.95);
+    border-color: rgba(167, 139, 250, 0.45);
+    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5), 0 0 18px rgba(124, 58, 237, 0.28);
+    color: #ffffff;
+    transform: translateY(-1px);
+}
+
+.quota-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+}
+
+.quota-dot.ok {
+    background: #10b981;
+    box-shadow: 0 0 8px rgba(16, 185, 129, 0.7);
+    animation: quota-pulse-green 2.5s infinite;
+}
+
+.quota-dot.warn {
+    background: #f59e0b;
+    box-shadow: 0 0 8px rgba(245, 158, 11, 0.7);
+    animation: quota-pulse-warn 2s infinite;
+}
+
+.quota-dot.low {
+    background: #ef4444;
+    box-shadow: 0 0 8px rgba(239, 68, 68, 0.7);
+    animation: quota-pulse-low 1.5s infinite;
+}
+
+.quota-dot.idle {
+    background: #a78bfa;
+    box-shadow: 0 0 6px rgba(167, 139, 250, 0.6);
+}
+
+@keyframes quota-pulse-green {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.9); }
+}
+
+@keyframes quota-pulse-warn {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.45; transform: scale(0.85); }
+}
+
+@keyframes quota-pulse-low {
+    0%, 100% { opacity: 1; transform: scale(1.05); }
+    50% { opacity: 0.4; transform: scale(0.85); }
+}
+
+.quota-btn-title {
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    color: #f4f4f5;
+}
+
+.quota-pill-badge {
+    font-size: 0.72rem;
+    color: #a1a1aa;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+    padding: 0.15rem 0.5rem;
+    font-weight: 400;
+    letter-spacing: 0.2px;
+}
+
+.quota-arrow {
+    font-size: 0.65rem;
+    color: #a1a1aa;
+    transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    margin-left: 0.1rem;
+}
+
+.quota-floater-details[open] .quota-arrow {
+    transform: rotate(180deg);
+}
+
+.quota-floater-card {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    width: 320px;
+    background: rgba(16, 16, 22, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 16px;
+    padding: 1.1rem 1.15rem 1rem;
+    box-shadow: 0 20px 48px -8px rgba(0, 0, 0, 0.8), 0 0 28px rgba(124, 58, 237, 0.15);
+    backdrop-filter: blur(28px);
+    -webkit-backdrop-filter: blur(28px);
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-8px);
+    transition: opacity 0.22s cubic-bezier(0.16, 1, 0.3, 1), transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.22s;
+    pointer-events: none;
+    z-index: 100000;
+}
+
+/* Invisible bridge so mouse hover doesn't break between button and card */
+.quota-floater-card::before {
+    content: '';
+    position: absolute;
+    top: -12px;
+    left: 0;
+    right: 0;
+    height: 12px;
+}
+
+.quota-floater-card.warn-state {
     border-color: #ef4444 !important;
-    box-shadow: 0 0 10px rgba(239, 68, 68, 0.25) !important;
+    box-shadow: 0 20px 48px -8px rgba(0, 0, 0, 0.8), 0 0 24px rgba(239, 68, 68, 0.25) !important;
 }
-.quota-head {
+
+.quota-floater-details[open] .quota-floater-card {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+    pointer-events: auto;
+}
+
+@media (hover: hover) {
+    .quota-floater-root:hover .quota-floater-card {
+        opacity: 1;
+        visibility: visible;
+        transform: translateY(0);
+        pointer-events: auto;
+    }
+    .quota-floater-root:hover .quota-arrow {
+        transform: rotate(180deg);
+    }
+}
+
+.quota-card-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    font-size: 0.72rem;
+    margin-bottom: 0.85rem;
+    padding-bottom: 0.55rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.quota-card-header-title {
+    font-size: 0.76rem;
     font-weight: 700;
-    letter-spacing: 1px;
+    letter-spacing: 0.8px;
     text-transform: uppercase;
+    color: #f4f4f5;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.quota-badge-pill {
+    font-size: 0.65rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #c4b5fd;
+    background: rgba(124, 58, 237, 0.16);
+    border: 1px solid rgba(124, 58, 237, 0.3);
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+}
+
+.quota-metric-block {
+    margin-bottom: 0.75rem;
+}
+
+.quota-metric-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.74rem;
     color: #e4e4e7;
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.35rem;
+    font-weight: 500;
 }
-.quota-head span:last-child {
-    font-size: 0.68rem;
+
+.quota-metric-val {
+    font-size: 0.72rem;
+    color: #a1a1aa;
     font-weight: 400;
-    letter-spacing: normal;
-    text-transform: none;
-    color: #71717a;
-    white-space: nowrap;
 }
+
 .quota-track {
     width: 100%;
     background: rgba(255, 255, 255, 0.08);
@@ -360,41 +563,77 @@ footer,
     overflow: hidden;
     position: relative;
 }
+
 .quota-fill {
     height: 100%;
     border-radius: 99px;
     transition: width 0.4s ease;
 }
+
 .quota-fill.ok {
     background: #10b981;
     box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
 }
+
 .quota-fill.warn {
     background: #f59e0b;
     box-shadow: 0 0 8px rgba(245, 158, 11, 0.4);
 }
+
 .quota-fill.low {
     background: #ef4444;
     box-shadow: 0 0 8px rgba(239, 68, 68, 0.4);
 }
+
 .quota-fill.session {
     background: linear-gradient(90deg, #7c3aed, #a78bfa);
 }
+
 .quota-fill.empty {
     background: rgba(255, 255, 255, 0.15);
 }
+
 .quota-sub {
-    font-size: 0.72rem;
+    font-size: 0.7rem;
     color: #a1a1aa;
     margin-top: 0.3rem;
-    margin-bottom: 0.55rem;
     white-space: nowrap;
 }
+
 .quota-warn-msg {
     font-size: 0.7rem;
     color: #f87171;
     margin-top: 0.45rem;
     font-weight: 500;
+}
+
+.quota-footer {
+    margin-top: 0.65rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    font-size: 0.66rem;
+    color: #71717a;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+@media (max-width: 640px) {
+    .quota-floater-root {
+        top: 0.75rem !important;
+        right: 0.75rem !important;
+    }
+    .quota-floater-btn {
+        padding: 0.35rem 0.65rem !important;
+        font-size: 0.74rem !important;
+    }
+    .quota-pill-badge {
+        display: none !important;
+    }
+    .quota-floater-card {
+        width: min(300px, calc(100vw - 1.5rem)) !important;
+        right: 0 !important;
+    }
 }
 
 /* ─── Chat messages ──────────────────────────────────────── */

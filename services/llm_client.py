@@ -77,16 +77,63 @@ def _update_rate_info(model_or_headers, headers=None) -> None:
                 _rate_info[model][key] = headers_dict[key]
 
 
+_last_probe_time: float = 0.0
+
+
+def fetch_live_rate_info(force: bool = False) -> dict:
+    """Fetch live Groq rate limit headers dynamically using a fast probe call.
+
+    Throttled to avoid unnecessary API calls if probed within the last 30 seconds.
+    """
+    global _last_probe_time
+    import time
+    now = time.time()
+    if not force and (now - _last_probe_time < 30.0):
+        with _rate_info_lock:
+            for m, data in _rate_info.items():
+                if data and data.get("x-ratelimit-remaining-requests") is not None:
+                    return dict(data)
+            return {}
+
+    api_key = os.environ.get("GROQ_API_KEY", "").strip()
+    if not api_key:
+        return {}
+
+    try:
+        active = _get_active_model_chain()
+        target_model = active[0] if active else _DEFAULT_MODEL_CHAIN[0]
+        client = get_groq_client()
+        raw_resp = client.chat.completions.with_raw_response.create(
+            model=target_model,
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=1,
+        )
+        _last_probe_time = now
+        _update_rate_info(target_model, raw_resp.headers)
+        with _rate_info_lock:
+            return dict(_rate_info.get(target_model, {}))
+    except Exception as e:
+        print(f"[llm_client] fetch_live_rate_info: {e}")
+        with _rate_info_lock:
+            for m, data in _rate_info.items():
+                if data and data.get("x-ratelimit-remaining-requests") is not None:
+                    return dict(data)
+            return {}
+
+
 def get_rate_info(model: str | None = None) -> dict:
     """Return a snapshot of the latest Groq rate limit headers for a model.
 
-    Defaults to the first model in the active chain.
+    If no rate info is cached, dynamically probes Groq for live quota.
     """
-    if model is None:
-        active = _get_active_model_chain()
-        model = active[0] if active else _DEFAULT_MODEL_CHAIN[0]
     with _rate_info_lock:
-        return dict(_rate_info.get(model, {}))
+        if model and model in _rate_info and _rate_info[model]:
+            return dict(_rate_info[model])
+        for m, data in _rate_info.items():
+            if data and data.get("x-ratelimit-remaining-requests") is not None:
+                return dict(data)
+
+    return fetch_live_rate_info()
 
 
 def quota_ok(model: str | None = None, min_requests: int = 5, min_tokens: int = 2000) -> bool:
