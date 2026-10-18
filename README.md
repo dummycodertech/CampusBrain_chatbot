@@ -25,7 +25,7 @@ Campus Brain operates in two distinct modes: as an embedded widget via an `<ifra
 ---
 
 ### 🔗 Quick Links
-- **Live Application**: [campusbrain.streamlit.app](https://campusbrain.streamlit.app)
+- **Live Application**: [campusbrain.streamlit.app](https://campusbrainchatbot.streamlit.app/)
 - **GitHub Repository**: [dummycodertech/CampusBrain_chatbot](https://github.com/dummycodertech/CampusBrain_chatbot)
 - **Interactive Architecture Map**: [GitDiagram Interactive View](https://gitdiagram.com/dummycodertech/campusbrain_chatbot)
 - **Project Defense & Viva Guide**: [CampusBrain_Project_Defense_Guide.pdf](CampusBrain_Project_Defense_Guide.pdf)
