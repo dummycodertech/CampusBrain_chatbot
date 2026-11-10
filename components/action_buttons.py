@@ -487,13 +487,13 @@ def _render_answer_checker(paper_text: str) -> None:
 def _build_export_text() -> str:
     """Serialise the chat history to a plain-text string."""
     lines = [
-        "Campus Brain — Chat Export",
+        "ExamPrep — Chat Export",
         f"Exported: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
         "=" * 60,
         "",
     ]
     for msg in st.session_state.messages:
-        role = "You" if msg["role"] == "user" else "Campus Brain"
+        role = "You" if msg["role"] == "user" else "ExamPrep"
         content = msg.get("content", "")
 
         # Pretty-print structured types
@@ -669,7 +669,7 @@ def render_action_buttons(paper_text: str, subject: str = "") -> None:
             st.download_button(
                 label="💾 Export Chat",
                 data=export_bytes,
-                file_name=f"campus_brain_chat_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                file_name=f"examprep_chat_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.txt",
                 mime="text/plain",
                 use_container_width=True,
                 help="Download the full conversation as a .txt file",

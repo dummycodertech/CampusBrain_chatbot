@@ -74,14 +74,14 @@ print("[app] Storage: local SQLite (cleared on redeploy/restart)")
 
 from components.theme import inject_stitch_theme
 from ingestion.cache_writer import ingest_paper
-from ingestion.subject_reference import get_branches_and_semesters, get_expected_subjects
+from ingestion.subject_reference import get_expected_subjects
 from retrieval.paper_lookup import get_paper_text
 from components.action_buttons import render_action_buttons
 from components.chat_box import render_chat_box
 from components.usage_meter import render_usage_meter
 
 st.set_page_config(
-    page_title="Campus Brain",
+    page_title="ExamPrep",
     page_icon="🧠",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -103,8 +103,6 @@ branch     = params.get("branch", "")
 semester   = params.get("semester", "")
 
 is_local_upload = False
-is_other = False
-typed_subject = ""
 
 if not paper_id or not pdf_url:
     # ─── Landing hero ─────────────────────────────────────────
@@ -112,7 +110,7 @@ if not paper_id or not pdf_url:
         """
         <div style="text-align:center; padding: 4rem 0 0; position: relative; z-index: 1;">
             <div class="hero-label">
-                🧠 &nbsp; Campus Brain &nbsp; ✦
+                🧠 &nbsp; ExamPrep &nbsp; ✦
             </div>
         </div>
         """,
@@ -131,49 +129,6 @@ if not paper_id or not pdf_url:
 
     # ─── Frosted glass upload panel ───────────────────────────
     st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
-
-    if not branch or not semester:
-        branches, semesters = get_branches_and_semesters()
-        branch_options = branches + ["Other / not listed"]
-        semester_options = semesters + ["Other / not listed"]
-
-        col1, col2 = st.columns(2)
-        with col1:
-            b_idx = branch_options.index(branch) if branch in branch_options else 0
-            selected_branch = st.selectbox(
-                "Branch",
-                options=branch_options,
-                index=b_idx,
-                key="upload_branch",
-            )
-        with col2:
-            if selected_branch == "Other / not listed":
-                selected_semester = "Other / not listed"
-                st.selectbox(
-                    "Semester",
-                    options=["Other / not listed"],
-                    disabled=True,
-                    key="upload_semester",
-                )
-            else:
-                s_idx = semester_options.index(semester) if semester in semester_options else 0
-                selected_semester = st.selectbox(
-                    "Semester",
-                    options=semester_options,
-                    index=s_idx,
-                    key="upload_semester",
-                )
-
-        if selected_branch == "Other / not listed" or selected_semester == "Other / not listed":
-            is_other = True
-            typed_subject = st.text_input(
-                "Subject name",
-                placeholder="Enter subject name",
-                key="upload_typed_subject",
-            )
-        else:
-            branch = selected_branch
-            semester = selected_semester
 
     uploaded_file = st.file_uploader(
         "",
@@ -196,28 +151,23 @@ if not paper_id or not pdf_url:
         render_usage_meter()
         st.stop()
 
-    if is_other and not typed_subject.strip():
-        st.warning("Please enter the subject name above.")
-        st.stop()
-
     import hashlib
     file_bytes = uploaded_file.getvalue()
     paper_id       = hashlib.md5(file_bytes).hexdigest()
-    subject        = typed_subject.strip() if is_other else uploaded_file.name
+    subject        = uploaded_file.name
     year           = "Uploaded"
     is_local_upload = True
 
-    if not is_other:
-        from storage.cache_store import CacheStore
-        store = CacheStore()
-        if store.is_cached(paper_id):
-            with store._connect() as conn:
-                row = conn.execute(
-                    "SELECT subject FROM pages WHERE paper_id = ? AND subject != 'Unknown' LIMIT 1",
-                    (paper_id,),
-                ).fetchone()
-                if row and row[0]:
-                    subject = row[0]
+    from storage.cache_store import CacheStore
+    store = CacheStore()
+    if store.is_cached(paper_id):
+        with store._connect() as conn:
+            row = conn.execute(
+                "SELECT subject FROM pages WHERE paper_id = ? AND subject != 'Unknown' LIMIT 1",
+                (paper_id,),
+            ).fetchone()
+            if row and row[0]:
+                subject = row[0]
 
 # ─── Session reset on new paper ───────────────────────────────
 # Guard: clear the chat history whenever the active paper changes so
@@ -261,24 +211,24 @@ try:
                     tmp.write(file_bytes)
                     tmp_path = Path(tmp.name)
                 try:
-                    if is_other:
-                        known_subjects = [subject] if subject else ["Unknown"]
-                    else:
-                        known_subjects = get_expected_subjects(branch, semester)
+                    known_subjects = (
+                        get_expected_subjects(branch, semester)
+                        if branch and semester
+                        else []
+                    ) or ([subject] if subject else ["Unknown"])
                     _ocr_warnings = ingest_local_paper(
                         paper_id, tmp_path, year=year, known_subjects=known_subjects
                     )
                 finally:
                     os.remove(tmp_path)
 
-                if not is_other:
-                    with store._connect() as conn:
-                        row = conn.execute(
-                            "SELECT subject FROM pages WHERE paper_id = ? AND subject != 'Unknown' LIMIT 1",
-                            (paper_id,),
-                        ).fetchone()
-                        if row and row[0]:
-                            subject = row[0]
+                with store._connect() as conn:
+                    row = conn.execute(
+                        "SELECT subject FROM pages WHERE paper_id = ? AND subject != 'Unknown' LIMIT 1",
+                        (paper_id,),
+                    ).fetchone()
+                    if row and row[0]:
+                        subject = row[0]
         else:
             _ocr_warnings = ingest_paper(
                 paper_id=paper_id,
