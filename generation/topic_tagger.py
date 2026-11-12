@@ -40,9 +40,10 @@ def normalize_label(label: str, known: Any) -> str:
     lbl = lbl[:40].strip()
     if lbl.islower():
         lbl = lbl.title()
-    lbl_lower = lbl.lower()
+    lbl_cmp = re.sub(r"['’]s\b", "", lbl.lower()).strip()
     for k in known:
-        if difflib.SequenceMatcher(None, lbl_lower, str(k).lower()).ratio() > 0.85:
+        k_cmp = re.sub(r"['’]s\b", "", str(k).lower()).strip()
+        if difflib.SequenceMatcher(None, lbl_cmp, k_cmp).ratio() >= 0.78:
             return str(k)
     return lbl
 
@@ -83,6 +84,7 @@ def tag_paper_topics(
     """
     store = CacheStore()
     sub = (subject or "").strip().lower()
+    _notices.pop(paper_id, None)
 
     # a. Check cached topic map
     if not bypass_cache and store.has_topic_map(paper_id, sub):
@@ -149,10 +151,15 @@ def tag_paper_topics(
         _notices[paper_id] = "daily AI topic budget reached"
         return _apply_fallback()
 
-    if not quota_ok(TAGGING_MODEL):
-        print(f"[tagger] Blocked by quota check: quota low for model {TAGGING_MODEL}")
-        _notices[paper_id] = "AI quota is low right now"
-        return _apply_fallback()
+    target_model = TAGGING_MODEL
+    if not quota_ok(TAGGING_MODEL, min_requests=1, min_tokens=400):
+        # Allow fallback chain (e.g. primary 120b model) before blocking
+        if quota_ok(None, min_requests=1, min_tokens=400):
+            target_model = None
+        else:
+            print(f"[tagger] Blocked by quota check: quota low for model {TAGGING_MODEL}")
+            _notices[paper_id] = "AI quota is low right now"
+            return _apply_fallback()
 
     # f. LLM Tagging in chunks of 30
     produced_labels: List[str] = []
@@ -180,7 +187,7 @@ def tag_paper_topics(
         )
 
         try:
-            resp = generate_text(prompt, model=TAGGING_MODEL, temperature=0.0, max_tokens=3000)
+            resp = generate_text(prompt, model=target_model, temperature=0.0, max_tokens=3000)
             store.bump_usage("tagging")
         except LLMUnavailableError:
             _notices[paper_id] = "the AI is unavailable"
@@ -271,9 +278,11 @@ def ensure_tagged(
             results[pid] = (pid, year, [], False)
         else:
             rows, used_llm = tag_paper_topics(pid, subject, text)
-            tagged_new_count += 1
+            if used_llm or rows:
+                tagged_new_count += 1
             results[pid] = (pid, year, rows, used_llm)
-            if get_last_notice(pid) is not None or not used_llm:
+            notice = get_last_notice(pid)
+            if notice in ("daily AI topic budget reached", "AI quota is low right now", "the AI is unavailable"):
                 stopped = True
 
         done += 1

@@ -192,3 +192,49 @@ def test_mock_paper_recognizes_multiple_papers_in_same_year():
     ]
     mock = build_mock_paper(tagged, structure=[{"section": "Section A", "marks": 5, "count": 2}], seed=42)
     assert not any("Only 1 paper was available" in w for w in mock["warnings"])
+
+
+def test_find_repeated_questions_matches_rephrased_and_cluttered_questions():
+    """Rephrased PYQs with UNIT/asterisk clutter should still match across papers."""
+    papers = [
+        (
+            "p1",
+            "Jan 2024",
+            "Q1. State and explain Norton's theorem. Show that Thevenin's and Norton's theorems are dual to each other. **** --- UNIT-II [5M]",
+        ),
+        (
+            "p2",
+            "Jun 2024",
+            "Q1. Explain Norton theorem and show duality between Thevenin and Norton theorems. [10M]",
+        ),
+    ]
+    repeated = find_repeated_questions(papers)
+    assert len(repeated) == 1
+    assert repeated[0]["count"] == 2
+    assert "****" not in repeated[0]["text"]
+
+
+def test_ensure_tagged_continues_after_empty_page(tmp_path):
+    """If one sub-paper has zero extracted questions, ensure_tagged must still tag remaining papers."""
+    from generation.topic_tagger import ensure_tagged, normalize_label
+    from storage.cache_store import CacheStore
+
+    assert normalize_label("Thevenin's Theorem", ["Thevenin Theorem"]) == "Thevenin Theorem"
+
+    store = CacheStore(db_path=tmp_path / "ensure.db")
+    papers = [
+        ("p1", "Mar 2025", "Q1. Write a Java program to demonstrate multithreading using Runnable interface. [10M]"),
+        ("p2", "Mar 2025", "Blank"),  # no extractable questions
+        ("p3", "Apr 2024", "Q1. Explain exception handling with try, catch, and finally blocks in Java. [10M]"),
+    ]
+    with patch("generation.topic_tagger.CacheStore", return_value=store), \
+         patch("generation.topic_tagger.quota_ok", return_value=True), \
+         patch(
+             "generation.topic_tagger.generate_text",
+             side_effect=['{"1": "Multithreading"}', '{"1": "Exception Handling"}'],
+         ):
+        res = ensure_tagged(papers, "Programming in Java", max_new=6)
+
+    tagged_ok = [r for r in res if r[2]]
+    assert len(tagged_ok) == 2
+

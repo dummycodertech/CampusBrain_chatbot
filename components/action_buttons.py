@@ -269,10 +269,20 @@ def _render_predictor(paper_text: str, subject: str = "") -> None:
     tagged = [(pid, year, rows) for pid, year, rows, used_llm in tagged_results if rows]
     untagged_count = sum(1 for pid, year, rows, used_llm in tagged_results if not rows)
     if untagged_count > 0:
-        st.info(f"{untagged_count} paper(s) not tagged yet; click again to continue.")
+        from generation.topic_tagger import get_last_notice
+        first_notice = next(
+            (get_last_notice(pid) for pid, _, rows, _ in tagged_results if not rows and get_last_notice(pid)),
+            None,
+        )
+        if first_notice:
+            st.info(f"{untagged_count} paper(s) not tagged yet ({first_notice}); click Predictor again in a minute to continue.")
+        else:
+            st.info(f"{untagged_count} paper(s) not tagged yet; click again to continue.")
 
     if len(tagged) < 2:
-        st.info("Open at least 2 papers of this subject for predictions")
+        st.info(
+            f"Only {len(tagged)} of {len(filtered_papers)} selected papers could be topic-tagged so far; click Predictor again in a moment."
+        )
         return
 
     with st.spinner("Analysing multi-year exam trends..."):

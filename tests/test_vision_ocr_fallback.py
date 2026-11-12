@@ -72,9 +72,14 @@ def test_digital_page_fallback_triggers_only_when_graphics_or_broken_math_presen
     assert need_plain is False
 
     circuit_text = "Q1. Calculate Vth across terminals A-B in the circuit shown below. [10M]"
-    need_circuit, reason = needs_vision_for_digital_page(circuit_text, has_diagram_image=False, drawing_count=35)
+    need_circuit, reason = needs_vision_for_digital_page(circuit_text, has_diagram_image=False, drawing_count=12)
     assert need_circuit is True
     assert reason == "digital_page_with_diagram"
+
+    brief_circuit_text = "Q1. For the circuit, find equivalent resistance across A-B. [5M]"
+    need_brief, reason_brief = needs_vision_for_digital_page(brief_circuit_text, has_diagram_image=False, drawing_count=14)
+    assert need_brief is True
+    assert reason_brief == "digital_page_with_diagram"
 
     pua_text = "Q1. Solve \uf0f2 x^2 dx."
     need_pua, reason_pua = needs_vision_for_digital_page(pua_text, has_diagram_image=False, drawing_count=0)
@@ -131,9 +136,15 @@ def test_gemini_multi_key_failover(monkeypatch):
 def test_question_prep_retains_math_and_circuit_questions():
     text = (
         "Q1. Evaluate $\\int_0^2 (3x^2 + 2x + 1) dx$ for x = 0 to 2. [5M]\n"
-        "Q2. Find Vth and Rth for R1 = 10 ohm, R2 = 20 ohm, V = 12V. [10M]"
+        "Q2. 2 CO2 1(b) Find Vth and Rth for R1 = 10 ohm, R2 = 20 ohm, V = 12V. **** --- UNIT-I [10M]\n"
+        "Q3. Find the current in R2. [Circuit/Diagram: Node A connects 12V source through R1=4 ohm to Node B; R2=8 ohm connects Node B to ground.] [5M]"
     )
     qs = prepare_questions(text)
-    assert len(qs) == 2
+    assert len(qs) == 3
     assert "+" in qs[0]["text"]
     assert "=" in qs[1]["text"]
+    assert "CO2" not in qs[1]["text"]
+    assert "****" not in qs[1]["text"]
+    assert "UNIT-I" not in qs[1]["text"]
+    assert "[Circuit/Diagram:" in qs[2]["text"]
+

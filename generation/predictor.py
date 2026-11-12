@@ -35,13 +35,34 @@ def _parse_paper_tuple(paper: Any) -> Tuple[str, str, str]:
     return "", "Unknown", str(paper)
 
 
+_STOP_DOMAIN_WORDS = {
+    "explain", "define", "state", "derive", "prove", "discuss", "write",
+    "calculate", "find", "what", "how", "why", "which", "when", "where",
+    "suitable", "example", "examples", "diagram", "diagrams", "neat",
+    "theorem", "theorems", "following", "circuit", "circuits", "show",
+    "shown", "below", "above", "between", "difference", "differentiate",
+    "short", "note", "notes", "give", "with", "that", "this", "from",
+    "into", "across", "obtain", "determine", "expression", "equation",
+    "equations", "using", "used", "types", "different", "various",
+}
+
+
+def _strip_exam_clutter(text: str) -> str:
+    """Remove asterisks, UNIT/CO tags, and marks clutter before display/matching."""
+    t = re.sub(r"^\s*(?:\d+\s+)?CO\d\s*(?:\d+[a-zA-Z]?\s*\([a-zA-Z]\)|\(\w+\))?\s*", "", text, flags=re.I)
+    t = re.sub(r"\*{2,}|-{2,}\s*UNIT[\s\-]*[IVX\d]+|\bUNIT[\s\-]*[IVX\d]+\b|\bCO[1-6]\b", " ", t, flags=re.I)
+    return " ".join(t.split()).strip()
+
+
 def _normalize_question_for_match(text: str) -> str:
-    """Strip question prefix (e.g. 'Q1.', '(a)') and marks annotations for similarity comparison."""
+    """Strip question prefix (e.g. 'Q1.', '(a)'), marks, and clutter for similarity comparison."""
+    t = _strip_exam_clutter(text)
+    t = re.sub(r"\[(?:Circuit|Diagram)[^\]]*\]", " ", t, flags=re.IGNORECASE)
     # Strip leading label
     t = re.sub(
         r"^\s*(?:Q\.?\s*\d+[a-zA-Z]?|\d+[a-zA-Z]?|\([a-zA-Z\d]+\)|[a-zA-Z])[.)]?\s*",
         "",
-        text,
+        t,
         flags=re.IGNORECASE,
     )
     # Strip marks like [10M], (10 marks)
@@ -52,6 +73,11 @@ def _normalize_question_for_match(text: str) -> str:
         flags=re.IGNORECASE,
     )
     return " ".join(t.lower().split())
+
+
+def _domain_tokens(norm_text: str) -> Set[str]:
+    words = re.findall(r"[a-z]{3,}", norm_text.lower())
+    return {w.rstrip("s") if len(w) > 4 and w.endswith("s") else w for w in words if w not in _STOP_DOMAIN_WORDS}
 
 
 
@@ -174,7 +200,7 @@ def find_repeated_questions(papers: List[Any]) -> List[Dict[str, Any]]:
 
         chunks = split_into_questions(text)
         for idx, chunk in enumerate(chunks, start=1):
-            cleaned = _clean_question_text(chunk)
+            cleaned = _strip_exam_clutter(_clean_question_text(chunk))
             norm_match = _normalize_question_for_match(chunk)
             if len(norm_match) < 15:
                 continue  # skip short section headers or fragments
@@ -183,22 +209,31 @@ def find_repeated_questions(papers: List[Any]) -> List[Dict[str, Any]]:
             all_questions.append({
                 "text": cleaned,
                 "norm_match": norm_match,
+                "tokens": _domain_tokens(norm_match),
                 "year": y_str,
                 "paper_key": paper_key,
                 "marks": marks,
                 "q_no": q_no,
             })
 
-    # Cluster questions by difflib.SequenceMatcher ratio > 0.8
+    # Cluster questions by sequence similarity (>= 0.72) OR strong domain-concept overlap
     clusters: List[Dict[str, Any]] = []
 
     for q in all_questions:
         q_norm = q["norm_match"]
+        q_tokens = q["tokens"]
         matched_cluster = None
 
         for cluster in clusters:
             ratio = difflib.SequenceMatcher(None, q_norm, cluster["norm_match"]).ratio()
-            if ratio > 0.8:
+            is_match = ratio >= 0.72
+            if not is_match and q_tokens and cluster["tokens"]:
+                shared = q_tokens & cluster["tokens"]
+                union = q_tokens | cluster["tokens"]
+                jaccard = len(shared) / len(union) if union else 0.0
+                if (len(shared) >= 2 and jaccard >= 0.45) or (len(shared) >= 3 and jaccard >= 0.35):
+                    is_match = True
+            if is_match:
                 matched_cluster = cluster
                 break
 
@@ -214,6 +249,7 @@ def find_repeated_questions(papers: List[Any]) -> List[Dict[str, Any]]:
             clusters.append({
                 "text": q["text"],
                 "norm_match": q_norm,
+                "tokens": set(q_tokens),
                 "years": {q["year"]},
                 "paper_keys": {q["paper_key"]},
                 "marks": q["marks"],

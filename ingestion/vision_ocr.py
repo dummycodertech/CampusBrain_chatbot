@@ -29,12 +29,13 @@ _VISION_PROMPT_SCANNED = (
     "You are an expert OCR engine for university exam papers (especially engineering, "
     "mathematics, physics, and electrical/electronics circuits).\n"
     "Transcribe EVERY question and instruction on this exam page accurately in reading order:\n"
-    "1. Preserve question numbers (e.g., Q1., (a), (b)) and marks (e.g., [5M], (10 marks)).\n"
+    "1. Preserve question numbers (e.g., Q1., (a), (b)) and marks (e.g., [5M], (10 marks)). "
+    "Omit noisy decorative stars (****), UNIT headers, and CO1/CO2 outcome tags inside questions.\n"
     "2. Write all mathematical formulas, fractions, integrals, summations, matrices, "
-    "subscripts/superscripts, and Greek symbols clearly using LaTeX ($...$ inline or $$...$$).\n"
+    "subscripts/superscripts, and Greek symbols clearly using properly closed LaTeX ($...$ inline).\n"
     "3. For EVERY circuit diagram, schematic, logic gate diagram, block diagram, phasor, "
-    "waveform, K-map, or graph, include a clear structured description immediately under "
-    "that question in the format:\n"
+    "waveform, K-map, or graph, add a concise SINGLE-LINE description immediately under that "
+    "question (with NO numbered bullets inside it) in the exact format:\n"
     "   [Circuit/Diagram: <all nodes/terminals, components with exact values/units, "
     "sources, and how branches/gates are connected>]\n"
     "4. If the page is completely blank with no text or diagrams, reply with exactly: BLANK_PAGE\n"
@@ -46,24 +47,36 @@ _VISION_PROMPT_DIGITAL_WITH_DIAGRAM = (
     "extracted from this PDF page, but it contains circuit diagrams, figures, or math "
     "formulas that plain PDF text extraction misses or corrupts.\n"
     "Transcribe the FULL page cleanly in reading order:\n"
-    "1. Keep all question wording, numbers (Q1., (a), etc.), and marks accurate.\n"
-    "2. Format all equations/formulas/symbols in clean LaTeX ($...$).\n"
-    "3. Describe every circuit schematic, logic diagram, graph, waveform, or figure "
-    "accurately under its question as:\n"
+    "1. Keep all question wording, numbers (Q1., (a), etc.), and marks accurate; omit "
+    "decorative asterisks (****), UNIT headers, and CO codes.\n"
+    "2. Format all equations/formulas/symbols in cleanly closed LaTeX ($...$).\n"
+    "3. Describe every circuit schematic, logic diagram, graph, waveform, or figure as a "
+    "single-line summary (no numbered bullets inside) under its question:\n"
     "   [Circuit/Diagram: <all components, values, labels, terminals, and connections>]\n"
     "4. Output ONLY the complete transcribed exam page, with no commentary."
 )
 
 _DIAGRAM_KEYWORD_RE = re.compile(
     r"\b(?:"
-    r"circuit\s+shown|shown\s+(?:in\s+)?(?:the\s+)?fig|given\s+fig(?:ure)?|"
-    r"fig(?:ure)?\s*(?:below|above|\d)|below\s+fig(?:ure)?|"
+    r"(?:the\s+|given\s+|following\s+)?circuit\b|circuit\s+shown|shown\s+(?:in\s+)?(?:the\s+)?fig|"
+    r"given\s+fig(?:ure)?|fig(?:ure)?\s*(?:below|above|\d)|below\s+fig(?:ure)?|"
     r"following\s+(?:circuit|network|diagram|figure|waveform)|"
-    r"network\s+shown|block\s+diagram|logic\s+diagram|circuit\s+diagram|"
+    r"network\s+shown|for\s+the\s+network|equivalent\s+(?:circuit|resistance|impedance)|"
+    r"block\s+diagram|logic\s+diagram|circuit\s+diagram|"
     r"truth\s+table|k-?map|karnaugh|timing\s+diagram|state\s+diagram|"
-    r"phasor\s+diagram|waveform|flowchart|graph\s+shown|"
+    r"phasor\s*(?:diagram)?|waveform|flowchart|graph\s+shown|"
     r"thevenin|norton|mesh\s+analysis|nodal\s+analysis|"
-    r"kirchhoff|\bkvl\b|\bkcl\b|\brlc\b|op-?amp|transistor|mosfet|\bbjt\b"
+    r"kirchhoff|\bkvl\b|\bkcl\b|\brlc\b|op-?amp|transistor|mosfet|\bbjt\b|"
+    r"find\s+(?:v_?th|r_?th|i_?n|r_?n|v_?ab|i_?\d|v_?\d)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_DIGITAL_GRAPHICS_KEYWORD_RE = re.compile(
+    r"\b(?:"
+    r"circuit|network|diagram|fig(?:ure)?|waveform|phasor|k-?map|karnaugh|"
+    r"truth\s+table|graph|thevenin|norton|mesh|nodal|kvl|kcl|rlc|op-?amp|"
+    r"transistor|diode|mosfet|bjt|star|delta|bridge|sin|cos|rms|average"
     r")\b",
     re.IGNORECASE,
 )
@@ -175,7 +188,16 @@ def _unboxed_ink_ratio(preprocessed_img: Image.Image, ocr_data: dict) -> float:
     hist = ink_mask.histogram()
     ink_pixels = hist[255] if len(hist) > 255 else 0
     total_pixels = max(1, ink_mask.width * ink_mask.height)
-    return ink_pixels / total_pixels
+    ink_ratio = ink_pixels / total_pixels
+    if ink_ratio > 0.004:
+        return ink_ratio
+
+    # Even thin-line circuit schematics (wires, resistors) occupy concentrated grid cells
+    grid = ink_mask.resize((64, 90), getattr(Image, "Resampling", Image).BILINEAR)
+    dark_cells = sum(1 for val in grid.getdata() if val >= 16)
+    if dark_cells >= 4:
+        return 0.02
+    return ink_ratio
 
 
 def _has_visible_ink(img: Optional[Image.Image], min_ink_ratio: float = 0.0005) -> bool:
@@ -218,7 +240,7 @@ def needs_vision_for_scanned_page(
         return True, "fragmented_formula"
 
     if preprocessed_img is not None and ocr_data is not None:
-        if _unboxed_ink_ratio(preprocessed_img, ocr_data) > 0.015:
+        if _unboxed_ink_ratio(preprocessed_img, ocr_data) > 0.004:
             return True, "unrecognized_diagram_ink"
 
     return False, ""
@@ -236,8 +258,8 @@ def needs_vision_for_digital_page(
     if _STRAY_MATH_ARTIFACT_RE.search(page_text):
         return True, "broken_math_glyphs"
 
-    has_graphics = has_diagram_image or drawing_count >= 25
-    if has_graphics and _DIAGRAM_KEYWORD_RE.search(page_text):
+    has_graphics = has_diagram_image or drawing_count >= 10
+    if has_graphics and _DIGITAL_GRAPHICS_KEYWORD_RE.search(page_text):
         return True, "digital_page_with_diagram"
 
     if has_diagram_image and _MATH_KEYWORD_RE.search(page_text):

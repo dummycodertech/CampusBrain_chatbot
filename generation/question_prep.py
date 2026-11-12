@@ -152,6 +152,10 @@ def prepare_questions(text: str) -> List[Dict[str, Any]]:
             flags=re.IGNORECASE,
         )
 
+        # Strip decorative asterisks / UNIT separators / Bloom & CO tags (e.g. "**** --- UNIT-I", "2 CO2 1(b)")
+        cleaned = re.sub(r"^\s*(?:\d+\s+)?CO\d\s*(?:\d+[a-zA-Z]?\s*\([a-zA-Z]\)|\(\w+\))?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\*{2,}|-{2,}\s*UNIT[\s\-]*[IVX\d]+|\bUNIT[\s\-]*[IVX\d]+\b|\bCO[1-6]\b", " ", cleaned, flags=re.IGNORECASE)
+
         # Remove tokens made only of punctuation or stray OCR symbols (; : ' ‘ ’ ~ | _ ,)
         # while keeping mathematical operators/symbols (= + - * / ^ $ Ω ∫ ∑ etc.)
         _math_keep = set("+-*/=<>^$%±×÷√∫∑∏≤≥≠≈°Ωµθφπαβλ")
@@ -168,10 +172,9 @@ def prepare_questions(text: str) -> List[Dict[str, Any]]:
         # Collapse whitespace
         cleaned = " ".join(cleaned.split()).strip()
 
-        # d. Drop chunks with fewer than 4 words or very low alphabetic ratio
-        # (relax ratio for formula/circuit chunks so equations & electrical units survive)
+        # d. Drop chunks with fewer than 4 words (or 3 with question/code/math cues) or very low alphabetic ratio
         w_list = cleaned.split()
-        if len(w_list) < 4:
+        if len(w_list) < 3 or (len(w_list) == 3 and "?" not in cleaned and not any(v in cleaned.lower() for v in QUESTION_VERBS)):
             continue
         non_space = [c for c in cleaned if not c.isspace()]
         if not non_space:
@@ -185,19 +188,27 @@ def prepare_questions(text: str) -> List[Dict[str, Any]]:
         if len(letters) / len(non_space) < min_alpha_ratio:
             continue
 
-        # Cap at 450 characters, cutting at a sentence end if possible
-        if len(cleaned) > 450:
-            sub = cleaned[:451]
+        # Cap at 900 chars when a circuit/diagram description is included (600 otherwise)
+        max_len = 900 if "[Circuit" in cleaned or "[Diagram" in cleaned else 600
+        if len(cleaned) > max_len:
+            sub = cleaned[:max_len + 1]
             last_punct = -1
-            for p in (".", "?", "!"):
+            for p in (".", "?", "!", "]"):
                 pos = sub.rfind(p)
-                if pos > last_punct and pos >= 100:
+                if pos > last_punct and pos >= 120:
                     last_punct = pos
             if last_punct != -1:
                 cleaned = sub[:last_punct + 1].strip()
             else:
-                last_space = sub[:450].rfind(" ")
-                cleaned = sub[:last_space].strip() if last_space > 200 else sub[:450].strip()
+                last_space = sub[:max_len].rfind(" ")
+                cleaned = sub[:last_space].strip() if last_space > 200 else sub[:max_len].strip()
+
+        # Avoid leaving an unclosed trailing '$' fragment that breaks Markdown KaTeX
+        if cleaned.count("$") % 2 == 1:
+            last_dollar = cleaned.rfind("$")
+            tail_after = cleaned[last_dollar:]
+            if len(tail_after) <= 4:
+                cleaned = cleaned[:last_dollar].rstrip()
 
         results.append({
             "q_no": q_no,
