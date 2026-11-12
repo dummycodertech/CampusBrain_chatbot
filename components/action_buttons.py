@@ -71,6 +71,28 @@ def _render_heatmap(paper_text: str, subject: str = "") -> None:
     st.dataframe(display_df, use_container_width=True)
 
 
+def _get_papers_for_action(store, sub: str, current_paper_id: str, paper_text: str):
+    """Fetch all cached papers for `sub` (splitting merged PDFs) plus current paper splits if needed."""
+    papers = store.get_subject_papers(sub) if sub != "General" else []
+    seen_pids = {str(p[0]) for p in papers}
+
+    has_current = bool(
+        current_paper_id
+        and any(
+            pid == current_paper_id or pid.startswith(f"{current_paper_id}#p")
+            for pid in seen_pids
+        )
+    )
+    if not has_current and (current_paper_id or (paper_text and paper_text.strip())):
+        cur_splits = store.get_paper_splits(current_paper_id, fallback_text=paper_text)
+        for sp in cur_splits:
+            if str(sp[0]) not in seen_pids:
+                papers.append(sp)
+                seen_pids.add(str(sp[0]))
+
+    return papers
+
+
 def _render_top_topics(paper_text: str, subject: str = "") -> None:
     """Render top 5 topics with exact questions and marks across past papers."""
     import re
@@ -95,11 +117,7 @@ def _render_top_topics(paper_text: str, subject: str = "") -> None:
     if not sub or sub.lower() == "unknown":
         sub = "General"
 
-    papers = store.get_subject_papers(sub) if sub != "General" else []
-    if not papers and paper_text and paper_text.strip():
-        m = re.search(r"20\d{2}", paper_text[:1000])
-        curr_year = m.group(0) if m else "Uploaded"
-        papers = [(current_paper_id or "current", curr_year, paper_text)]
+    papers = _get_papers_for_action(store, sub, current_paper_id, paper_text)
 
     if len(papers) == 1:
         st.info("ℹ️ Only 1 paper available; open more years of this subject to see trends.")
@@ -191,11 +209,7 @@ def _render_predictor(paper_text: str, subject: str = "") -> None:
     if not sub or sub.lower() == "unknown":
         sub = "General"
 
-    papers = store.get_subject_papers(sub) if sub != "General" else []
-    if not papers and paper_text and paper_text.strip():
-        m = re.search(r"20\d{2}", paper_text[:1000])
-        curr_year = m.group(0) if m else "Uploaded"
-        papers = [(current_paper_id or "current", curr_year, paper_text)]
+    papers = _get_papers_for_action(store, sub, current_paper_id, paper_text)
 
     if len(papers) < 2:
         st.info("Open at least 2 papers of this subject for predictions")
@@ -205,10 +219,18 @@ def _render_predictor(paper_text: str, subject: str = "") -> None:
 
     paper_labels = []
     label_to_paper = {}
-    for p in papers:
+    for idx, p in enumerate(papers, start=1):
         pid = str(p[0])
         yr = str(p[1])
-        label = yr if year_counts[yr] == 1 else f"{yr} · {pid[:6]}"
+        if year_counts[yr] == 1:
+            label = yr
+        elif "#p" in pid:
+            _, part_p = pid.split("#p", 1)
+            label = f"{yr} · p{part_p}"
+        else:
+            label = f"{yr} · {pid[:6]}"
+        if label in label_to_paper:
+            label = f"{label} ({idx})"
         paper_labels.append(label)
         label_to_paper[label] = p
 
@@ -324,11 +346,7 @@ def _render_mock_paper(paper_text: str, subject: str = "") -> None:
     if not sub or sub.lower() == "unknown":
         sub = "General"
 
-    papers = store.get_subject_papers(sub) if sub != "General" else []
-    if not papers and paper_text and paper_text.strip():
-        m = re.search(r"20\d{2}", paper_text[:1000])
-        curr_year = m.group(0) if m else "Uploaded"
-        papers = [(current_paper_id or "current", curr_year, paper_text)]
+    papers = _get_papers_for_action(store, sub, current_paper_id, paper_text)
 
     if not papers:
         st.info("Open the heatmap or Top 5 first, or upload more papers of this subject.")

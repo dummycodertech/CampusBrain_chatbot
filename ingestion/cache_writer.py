@@ -42,6 +42,7 @@ def ingest_paper(
     branch: str = "",
     semester: str = "",
     known_subjects: Optional[List[str]] = None,
+    subject: str = "",
 ) -> List[str]:
     """Fetch a PYQ PDF by URL, OCR/tag every page, and cache the result.
 
@@ -50,17 +51,32 @@ def ingest_paper(
     never needs to supply a subject array, just the branch/semester strings it
     already tracks for catalog filtering.
 
+    If ``subject`` is supplied (e.g. from URL query params), it is included in
+    known_subjects and used as fallback whenever page-level detection returns
+    ``"Unknown"``.
+
     Returns:
         List of warning strings (empty means success with no issues).
         Entries prefixed ``TESSERACT_MISSING:`` indicate the binary is absent.
     """
     _validate_paper_id(paper_id)
 
+    explicit_subj = (subject or "").strip()
+    if explicit_subj.lower() == "unknown":
+        explicit_subj = ""
+
     if known_subjects is None:
         known_subjects = get_expected_subjects(branch, semester)
+    else:
+        known_subjects = list(known_subjects)
+
+    if explicit_subj and all(s.lower() != explicit_subj.lower() for s in known_subjects):
+        known_subjects.append(explicit_subj)
 
     store = CacheStore()
     if store.is_cached(paper_id):
+        if explicit_subj:
+            store.backfill_paper_subject(paper_id, explicit_subj)
         return []  # already ingested, don't re-OCR
 
     import tempfile
@@ -86,10 +102,13 @@ def ingest_paper(
         tagged_pages, warnings = tag_and_extract_all(pages_iter, known_subjects)
 
         for page in tagged_pages:
+            page_subj = page["subject"]
+            if (not page_subj or page_subj.lower() == "unknown") and explicit_subj:
+                page_subj = explicit_subj
             store.save_page(
                 paper_id=paper_id,
                 page_num=page["page_num"],
-                subject=page["subject"],
+                subject=page_subj,
                 year=year,
                 text=page["text"],
                 ocr_conf=page.get("ocr_conf"),

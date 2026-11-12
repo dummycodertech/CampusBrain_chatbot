@@ -15,6 +15,165 @@ from typing import Optional, List, Tuple, Any, Dict
 DB_PATH = Path(__file__).parent / "cache.db"
 
 
+_PLACEHOLDER_YEARS = {
+    "", "uploaded", "unknown", "all years", "all", "unspecified", "none", "n/a",
+}
+
+_MONTH_PATTERN = re.compile(
+    r"\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    r"[\s,.\-/]*(20\d{2})\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_exam_label(
+    text: str,
+    stored_year: str = "",
+    part_idx: int = 1,
+    total_parts: int = 1,
+) -> str:
+    """Detect a concise exam year/label (e.g. 'Jan 2024', 'Mid Apr 2024', '2024', or 'Paper 2')."""
+    base = (stored_year or "").strip()
+    if total_parts == 1 and base.lower() not in _PLACEHOLDER_YEARS:
+        return base
+
+    head = (text or "")[:1200]
+    is_mid = bool(re.search(r"\bmid[\s\-]*term\b", head[:500], re.IGNORECASE))
+
+    m_mon = _MONTH_PATTERN.search(head)
+    if m_mon:
+        mon = m_mon.group(1)[:3].title()
+        yr = m_mon.group(2)
+        return f"Mid {mon} {yr}" if is_mid else f"{mon} {yr}"
+
+    m_yr = re.search(r"\b(20\d{2})\b", head) or re.search(r"\b(20\d{2})\b", text or "")
+    if m_yr:
+        yr = m_yr.group(1)
+        return f"Mid {yr}" if is_mid else yr
+
+    if total_parts > 1:
+        return f"Paper {part_idx}"
+    return base if base else "Uploaded"
+
+
+def _is_new_paper_page(page_text: str, prev_text: str) -> bool:
+    """Heuristic to decide if page_text starts a new exam paper inside a merged PDF."""
+    if not page_text or not page_text.strip():
+        return False
+
+    head = page_text[:900]
+    tail_prev = (prev_text or "")[-200:]
+    has_pto_prev = bool(re.search(r"p\.?\s*t\.?\s*o\.?\b", tail_prev, re.IGNORECASE))
+
+    c_exam = bool(
+        re.search(
+            r"\b(?:end|mid|semester|annual|supplementary|sessional|internal)\s*[- ]*\s*(?:term|sem(?:ester)?)\b"
+            r"|\b(?:end\s*term|mid\s*term|university)\s+examination\b",
+            head,
+            re.IGNORECASE,
+        )
+    )
+    c_roll = bool(
+        re.search(
+            r"\bplease\s+write\s+your\s+exam|\bexam\s*\.?\s*roll\s*no|\broll\s*no\.?\s*[:\-_]",
+            head,
+            re.IGNORECASE,
+        )
+    )
+    c_marks = bool(
+        re.search(
+            r"\bmax(?:imum)?\.?\s*marks\b|\bm\.?m\.?\s*[:\-]\s*\d+|\btime\s*[:\-]\s*\d+(?:\.\d+)?\s*(?:hr|hrs|hour|hours|min)",
+            head,
+            re.IGNORECASE,
+        )
+    )
+    c_note = bool(
+        re.search(r"\bnote\s*:\s*(?:attempt|answer|all\s+questions|q\.?\s*no)", head, re.IGNORECASE)
+    )
+    c_code = bool(re.search(r"\b(?:paper|subject|course)\s*code\b", head, re.IGNORECASE))
+    c_degree = bool(
+        re.search(r"\b(?:b\.?tech|m\.?tech|b\.?e\.?|bca|mca|b\.?sc)\b", head, re.IGNORECASE)
+    )
+    c_q1 = bool(
+        re.search(
+            r"(?:^|\n)\s*(?:Q\.?\s*1\b(?:\s*\(\s*a\s*\))?|Question\s*1\b|1\.\s+[A-Za-z]|PART[\s\-]*A\b|SECTION[\s\-]*A\b)",
+            page_text[:700],
+            re.IGNORECASE,
+        )
+    )
+
+    strong_cover = sum([c_exam, c_roll, c_marks, c_note])
+    all_cues = strong_cover + sum([c_code, c_degree, c_q1])
+
+    # Clear cover banner (e.g. Roll No + Max Marks / End Term + Attempt)
+    if strong_cover >= 2:
+        return True
+
+    # Respect P.T.O. continuation pages unless a full cover banner is present
+    if has_pto_prev:
+        return False
+
+    if c_exam and all_cues >= 2:
+        return True
+    if c_roll:
+        return True
+    if c_marks and (c_q1 or c_code or c_degree or c_note):
+        return True
+    if c_q1 and all_cues >= 2:
+        return True
+
+    # Question numbering restart: previous page had Q2+ and this page restarts at Q1 / PART A
+    # without being labelled Section/Part B-Z.
+    prev_had_later_q = bool(
+        re.search(r"(?:^|\n)\s*(?:Q\.?\s*[2-9]|Question\s*[2-9]|[2-9]\.\s+[A-Za-z])", prev_text or "", re.IGNORECASE)
+    )
+    is_later_section = bool(re.search(r"(?:PART|SECTION)\s*[B-Z]\b", head, re.IGNORECASE))
+    if prev_had_later_q and c_q1 and not is_later_section:
+        return True
+
+    return False
+
+
+def split_paper_pages(
+    paper_id: str,
+    page_rows: List[Tuple[int, str]],
+    stored_year: str = "",
+) -> List[Tuple[str, str, str]]:
+    """Split a cached paper's pages into logical exam papers if it is a combined PDF.
+
+    For a normal single exam paper (even multi-page), returns 1 tuple with the
+    original ``paper_id``. For a merged multi-paper PDF, returns one tuple per
+    detected exam paper with id ``f"{paper_id}#p{start_page}"``.
+    """
+    valid_pages = [(pn, txt) for pn, txt in page_rows if txt and txt.strip()]
+    if not valid_pages:
+        return []
+
+    groups: List[List[Tuple[int, str]]] = [[valid_pages[0]]]
+    for pn, txt in valid_pages[1:]:
+        prev_txt = groups[-1][-1][1]
+        if _is_new_paper_page(txt, prev_txt):
+            groups.append([(pn, txt)])
+        else:
+            groups[-1].append((pn, txt))
+
+    total_parts = len(groups)
+    out: List[Tuple[str, str, str]] = []
+    for idx, grp in enumerate(groups, start=1):
+        sub_pid = paper_id if total_parts == 1 else f"{paper_id}#p{grp[0][0]}"
+        combined_text = "\n\n".join(t for _, t in grp)
+        label = _extract_exam_label(
+            grp[0][1],
+            stored_year=stored_year,
+            part_idx=idx,
+            total_parts=total_parts,
+        )
+        out.append((sub_pid, label, combined_text))
+
+    return out
+
+
 class CacheStore:
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
@@ -153,11 +312,70 @@ class CacheStore:
                 results.append((year, text))
         return results
 
-    def get_subject_papers(self, subject: str) -> List[Tuple[str, str, str]]:
-        """Return [(paper_id, year, text_of_only_pages_tagged_with_subject)] ordered by page_num.
+    def backfill_paper_subject(self, paper_id: str, subject: str) -> None:
+        """Replace 'Unknown'/empty subject tags for paper_id when an explicit subject is known."""
+        sub = (subject or "").strip()
+        if not paper_id or not sub or sub.lower() == "unknown":
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE pages
+                   SET subject = ?
+                   WHERE paper_id = ?
+                     AND (subject IS NULL OR TRIM(subject) = '' OR LOWER(subject) = 'unknown')""",
+                (sub, paper_id),
+            )
+            conn.commit()
 
-        If a paper's year is empty or 'Uploaded', detects it from the first page text
-        with r'20\\d{2}'; keeps 'Uploaded' if none found.
+    def get_paper_splits(
+        self,
+        paper_id: str,
+        stored_year: str = "",
+        fallback_text: str = "",
+    ) -> List[Tuple[str, str, str]]:
+        """Return logical paper tuples [(sub_paper_id, year_or_label, text), ...] for a paper_id.
+
+        Automatically splits combined/merged multi-paper PDFs stored under one paper_id
+        into separate entries while leaving single multi-page papers intact.
+        """
+        page_rows: List[Tuple[int, str]] = []
+        db_year = (stored_year or "").strip()
+
+        if paper_id:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """SELECT page_num, text, year FROM pages
+                       WHERE paper_id = ? AND TRIM(text) != ''
+                       ORDER BY page_num""",
+                    (paper_id,),
+                ).fetchall()
+                if rows:
+                    page_rows = [(int(r[0]), str(r[1])) for r in rows]
+                    if not db_year:
+                        db_year = str(rows[0][2] or "").strip()
+
+        if page_rows:
+            return split_paper_pages(paper_id, page_rows, stored_year=db_year)
+
+        if fallback_text and fallback_text.strip():
+            raw_pages = [p.strip() for p in fallback_text.split("\f") if p.strip()]
+            if len(raw_pages) > 1:
+                return split_paper_pages(
+                    paper_id or "current",
+                    [(i, t) for i, t in enumerate(raw_pages, start=1)],
+                    stored_year=db_year,
+                )
+            label = _extract_exam_label(fallback_text, stored_year=db_year, part_idx=1, total_parts=1)
+            return [(paper_id or "current", label, fallback_text)]
+
+        return []
+
+    def get_subject_papers(self, subject: str) -> List[Tuple[str, str, str]]:
+        """Return [(paper_id, year, text), ...] for every paper tagged with this subject.
+
+        Automatically splits merged multi-paper PDFs (e.g. 5 papers in 5 pages under one
+        paper_id) into individual sub-papers so Predictor, Mock Paper, and Top 5 Topics
+        work across both single-paper PDFs and combined bundles.
         """
         with self._connect() as conn:
             paper_rows = conn.execute(
@@ -177,23 +395,13 @@ class CacheStore:
                 if not page_rows:
                     continue
 
-                tagged_text = "\n\n".join(r[1] for r in page_rows)
-
-                # Year detection: if empty or 'Uploaded', detect from first page text
-                year = (stored_year or "").strip()
-                if not year or year.lower() == "uploaded":
-                    first_page_row = conn.execute(
-                        "SELECT text FROM pages WHERE paper_id = ? ORDER BY page_num LIMIT 1",
-                        (paper_id,),
-                    ).fetchone()
-                    first_text = first_page_row[0] if first_page_row else page_rows[0][1]
-                    m = re.search(r"20\d{2}", first_text)
-                    if m:
-                        year = m.group(0)
-                    else:
-                        year = "Uploaded"
-
-                results.append((paper_id, year, tagged_text))
+                results.extend(
+                    split_paper_pages(
+                        paper_id,
+                        [(int(r[0]), str(r[1])) for r in page_rows],
+                        stored_year=(stored_year or "").strip(),
+                    )
+                )
 
         return results
 

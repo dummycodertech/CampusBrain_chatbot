@@ -22,6 +22,24 @@ def get_expected_subjects(branch: str, semester: str) -> List[str]:
     return data.get(f"{branch}-{semester}", [])
 
 
+def get_all_known_subjects() -> List[str]:
+    """Return deduplicated list of all subjects across data/subjects_by_semester.json."""
+    if not REFERENCE_PATH.exists():
+        return []
+    data = json.loads(REFERENCE_PATH.read_text(encoding="utf-8"))
+    seen = set()
+    subjects: List[str] = []
+    for key, vals in data.items():
+        if key.startswith("_") or not isinstance(vals, list):
+            continue
+        for s in vals:
+            s_clean = str(s).strip()
+            if s_clean and s_clean.lower() not in seen:
+                seen.add(s_clean.lower())
+                subjects.append(s_clean)
+    return subjects
+
+
 def get_branches_and_semesters() -> Tuple[List[str], List[str]]:
     """Parse existing keys in subjects_by_semester.json (e.g. 'IT-3') into unique branches and semesters."""
     if not REFERENCE_PATH.exists():

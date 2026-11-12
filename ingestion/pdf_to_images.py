@@ -34,6 +34,8 @@ except ImportError:
 
 from PIL import Image
 
+from ingestion.vision_ocr import is_vision_available, needs_vision_for_digital_page
+
 # Minimum character count for a page to be treated as text-based.
 # Real text pages typically have hundreds of chars; scanned pages produce
 # < 20 chars of garbage text from PyMuPDF.
@@ -63,13 +65,45 @@ def _render_page(page: "fitz.Page", dpi: int = SCAN_DPI) -> Image.Image:
     return Image.open(io.BytesIO(pix.tobytes("png")))
 
 
+def _digital_page_needs_vision(page: "fitz.Page", text: str) -> bool:
+    """Check if a digital-text PDF page also contains diagrams/circuits/broken math."""
+    if not is_vision_available():
+        return False
+    has_diagram_image = False
+    drawing_count = 0
+    try:
+        has_diagram_image = any(
+            info.get("width", 0) > 80 and info.get("height", 0) > 80
+            for info in page.get_image_info()
+        )
+    except Exception:
+        try:
+            has_diagram_image = len(page.get_images(full=True)) > 0
+        except Exception:
+            has_diagram_image = False
+    try:
+        drawing_count = len(page.get_drawings())
+    except Exception:
+        drawing_count = 0
+
+    needed, _ = needs_vision_for_digital_page(
+        text,
+        has_diagram_image=has_diagram_image,
+        drawing_count=drawing_count,
+    )
+    return needed
+
+
 def iter_pages(
     pdf_path: Path,
     dpi: int = SCAN_DPI,
 ) -> Iterator[Tuple[int, str, Optional[Image.Image]]]:
     """Yield ``(page_num, text, image_or_None)`` for every page, lazily.
 
-    - Text-based pages: yields ``(n, text, None)``.  No image rendered.
+    - Pure text-based pages: yields ``(n, text, None)``.  No image rendered.
+    - Text pages flagged for diagrams/broken math (when Gemini Vision is configured):
+      yields ``(n, text, image)`` at 200 DPI so Vision can inspect the figure/formulas
+      while preserving ``text`` as fallback.
     - Scanned pages: yields ``(n, "", image)``.  Image is a grayscale PIL Image
       at ``dpi`` resolution.  The caller **must discard the image after use** —
       the generator never holds more than one image in memory at a time.
@@ -81,7 +115,11 @@ def iter_pages(
         for i, page in enumerate(doc, start=1):
             text = page.get_text("text").strip()
             if len(text) >= MIN_TEXT_CHARS:
-                yield (i, text, None)
+                if _digital_page_needs_vision(page, text):
+                    img = _render_page(page, dpi=min(dpi, 200))
+                    yield (i, text, img)
+                else:
+                    yield (i, text, None)
             else:
                 img = _render_page(page, dpi=dpi)
                 yield (i, "", img)

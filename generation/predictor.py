@@ -163,8 +163,9 @@ def find_repeated_questions(papers: List[Any]) -> List[Dict[str, Any]]:
     # Extract all questions across papers with their year
     all_questions: List[Dict[str, Any]] = []
 
-    for p in papers:
+    for p_idx, p in enumerate(papers):
         pid, y_str, text = _parse_paper_tuple(p)
+        paper_key = pid.strip() or f"paper_{p_idx}_{y_str}"
         y_int = _year_num(y_str)
         if y_int == 0:
             m = re.search(r"20\d{2}", text[:1000])
@@ -183,6 +184,7 @@ def find_repeated_questions(papers: List[Any]) -> List[Dict[str, Any]]:
                 "text": cleaned,
                 "norm_match": norm_match,
                 "year": y_str,
+                "paper_key": paper_key,
                 "marks": marks,
                 "q_no": q_no,
             })
@@ -202,6 +204,7 @@ def find_repeated_questions(papers: List[Any]) -> List[Dict[str, Any]]:
 
         if matched_cluster:
             matched_cluster["years"].add(q["year"])
+            matched_cluster["paper_keys"].add(q["paper_key"])
             if q["marks"] > matched_cluster["marks"]:
                 matched_cluster["marks"] = q["marks"]
             # Retain the more descriptive question text
@@ -212,18 +215,19 @@ def find_repeated_questions(papers: List[Any]) -> List[Dict[str, Any]]:
                 "text": q["text"],
                 "norm_match": q_norm,
                 "years": {q["year"]},
+                "paper_keys": {q["paper_key"]},
                 "marks": q["marks"],
             })
 
-    # Filter to questions that appeared in 2 or more distinct years
+    # Filter to questions that appeared in 2 or more distinct papers
     repeated: List[Dict[str, Any]] = []
     for c in clusters:
-        if len(c["years"]) >= 2:
+        if len(c["paper_keys"]) >= 2:
             years_list = sorted(list(c["years"]), key=_year_num, reverse=True)
             repeated.append({
                 "text": c["text"],
                 "years": years_list,
-                "count": len(years_list),
+                "count": len(c["paper_keys"]),
                 "marks": c["marks"],
             })
 

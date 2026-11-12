@@ -153,12 +153,14 @@ def prepare_questions(text: str) -> List[Dict[str, Any]]:
         )
 
         # Remove tokens made only of punctuation or stray OCR symbols (; : ' ‘ ’ ~ | _ ,)
+        # while keeping mathematical operators/symbols (= + - * / ^ $ Ω ∫ ∑ etc.)
+        _math_keep = set("+-*/=<>^$%±×÷√∫∑∏≤≥≠≈°Ωµθφπαβλ")
         words = cleaned.split()
         filtered_words = []
         for w in words:
             if all(c in STRAY_CHARS for c in w):
                 continue
-            if not any(c.isalnum() for c in w) and not any(c in "?!" for c in w):
+            if not any(c.isalnum() for c in w) and not any(c in "?!" for c in w) and not any(c in _math_keep for c in w):
                 continue
             filtered_words.append(w)
         cleaned = " ".join(filtered_words)
@@ -166,7 +168,8 @@ def prepare_questions(text: str) -> List[Dict[str, Any]]:
         # Collapse whitespace
         cleaned = " ".join(cleaned.split()).strip()
 
-        # d. Drop chunks with fewer than 4 words or letters < 60% of non-space chars
+        # d. Drop chunks with fewer than 4 words or very low alphabetic ratio
+        # (relax ratio for formula/circuit chunks so equations & electrical units survive)
         w_list = cleaned.split()
         if len(w_list) < 4:
             continue
@@ -174,7 +177,12 @@ def prepare_questions(text: str) -> List[Dict[str, Any]]:
         if not non_space:
             continue
         letters = [c for c in non_space if c.isalpha()]
-        if len(letters) / len(non_space) < 0.60:
+        has_math_or_circuit = bool(
+            any(c in "$=+-∫∑Ω√≤≥" for c in cleaned)
+            or re.search(r"\[(?:Circuit|Diagram)|\b\d+\s*(?:V|A|mA|kV|Hz|kHz|MHz|mH|uF|µF|ohms?|W|kW)\b", cleaned, re.IGNORECASE)
+        )
+        min_alpha_ratio = 0.35 if has_math_or_circuit else 0.60
+        if len(letters) / len(non_space) < min_alpha_ratio:
             continue
 
         # Cap at 450 characters, cutting at a sentence end if possible

@@ -41,11 +41,13 @@ def _build_pool(
     pool: List[Dict[str, Any]] = []
     years_seen = set()
 
-    for item in tagged:
+    for idx, item in enumerate(tagged):
         if len(item) == 2:
             year, rows = item[0], item[1]
+            paper_key = f"p{idx}:{year}"
         elif len(item) == 3:
-            _, year, rows = item
+            pid, year, rows = item
+            paper_key = str(pid).strip() or f"p{idx}:{year}"
         else:
             continue
         year_str = str(year).strip() if year else "Uploaded"
@@ -62,6 +64,7 @@ def _build_pool(
                 "marks": r.get("marks", 0) or 0,
                 "q_no": r.get("q_no", ""),
                 "year": year_str,
+                "paper_key": paper_key,
             })
 
     has_real = any(q["topic"] not in _SKIP_TOPICS for q in pool)
@@ -135,7 +138,7 @@ def build_mock_paper(
 
     rng = random.Random(seed)
     pool, sorted_years = _build_pool(tagged)
-    papers_used = len({q["year"] for q in pool})
+    papers_used = len({q.get("paper_key") or q["year"] for q in pool})
     warnings: List[str] = []
 
     if papers_used < 2:

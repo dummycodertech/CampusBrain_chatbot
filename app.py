@@ -74,7 +74,7 @@ print("[app] Storage: local SQLite (cleared on redeploy/restart)")
 
 from components.theme import inject_stitch_theme
 from ingestion.cache_writer import ingest_paper
-from ingestion.subject_reference import get_expected_subjects
+from ingestion.subject_reference import get_all_known_subjects, get_expected_subjects
 from retrieval.paper_lookup import get_paper_text
 from components.action_buttons import render_action_buttons
 from components.chat_box import render_chat_box
@@ -214,7 +214,7 @@ try:
                     known_subjects = (
                         get_expected_subjects(branch, semester)
                         if branch and semester
-                        else []
+                        else get_all_known_subjects()
                     ) or ([subject] if subject else ["Unknown"])
                     _ocr_warnings = ingest_local_paper(
                         paper_id, tmp_path, year=year, known_subjects=known_subjects
@@ -236,6 +236,7 @@ try:
                 year=year,
                 branch=branch,
                 semester=semester,
+                subject=subject,
             )
 
         paper_text = get_paper_text(paper_id)

@@ -27,11 +27,19 @@ stays constant regardless of document length.
 """
 from __future__ import annotations
 
+import os
 import re
 from collections import OrderedDict
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from PIL import Image, ImageFilter, ImageOps
+
+from ingestion.vision_ocr import (
+    MAX_VISION_PAGES_PER_PAPER,
+    is_vision_available,
+    needs_vision_for_scanned_page,
+    ocr_page_with_gemini,
+)
 
 
 # ── Tesseract probe ───────────────────────────────────────────────────────────
@@ -156,6 +164,7 @@ def ocr_page(img: Image.Image) -> Tuple[str, float]:
             "text": text,
             "avg_conf": avg_conf,
             "word_count": word_count,
+            "data": data,
         })
         # If output meets quality threshold, accept immediately
         if len(text.strip()) >= 30 and avg_conf >= 40:
@@ -163,6 +172,7 @@ def ocr_page(img: Image.Image) -> Tuple[str, float]:
 
     # Pick the attempt with the highest average confidence
     best = max(attempts, key=lambda a: a["avg_conf"])
+    ocr_page.last_data = best.get("data")
     best_text = best["text"]
     best_conf = best["avg_conf"]
     best_words = best["word_count"]
@@ -173,6 +183,9 @@ def ocr_page(img: Image.Image) -> Tuple[str, float]:
         return "", max(best_conf, 0.0)
 
     return best_text, max(best_conf, 0.0)
+
+
+ocr_page.last_data = None
 
 
 # ── Subject detection (regex, no LLM) ─────────────────────────────────────────
@@ -186,10 +199,32 @@ _HEADER_PATTERNS = [
 
 def _detect_subject_from_text(text: str, known_subjects: List[str]) -> Optional[str]:
     """Return the matching known subject name if one appears in the page text."""
-    text_lower = text.lower()
-    for subj in known_subjects:
-        if subj.lower() in text_lower and len(subj) > 3:
+    candidates = [
+        s.strip() for s in known_subjects
+        if s and len(s.strip()) > 3 and s.strip().lower() != "unknown"
+    ]
+    # Prefer longest subject names first to avoid short-prefix collisions
+    candidates.sort(key=len, reverse=True)
+
+    header_lower = text[:1200].lower()
+    for subj in candidates:
+        if subj.lower() in header_lower:
             return subj
+
+    text_lower = text.lower()
+    for subj in candidates:
+        if subj.lower() in text_lower:
+            return subj
+
+    m = re.search(
+        r"(?im)^\s*(?:subject|course)\s*(?:name|title)?\s*[:\-]\s*([A-Za-z][A-Za-z0-9 &,/\-]{3,60})\s*$",
+        text[:1000],
+    )
+    if m:
+        extracted = " ".join(m.group(1).split()).strip(" .,-:")
+        if len(extracted) > 3 and extracted.lower() != "unknown":
+            return extracted
+
     return None
 
 
@@ -239,9 +274,17 @@ def tag_and_extract_all(
     subsequent pages inherit it until the next header.
     """
     use_tesseract = _tesseract_available()
+    vision_available = is_vision_available()
+    max_vision_pages = int(
+        os.environ.get("MAX_VISION_PAGES_PER_PAPER", str(MAX_VISION_PAGES_PER_PAPER)).strip()
+        or MAX_VISION_PAGES_PER_PAPER
+    )
+    vision_calls_used = 0
 
     if use_tesseract:
         print("[ocr_tagger] Tesseract available — using as primary OCR engine.")
+    elif vision_available:
+        print("[ocr_tagger] Tesseract not found — using Gemini Vision OCR for scanned pages.")
     else:
         print("[ocr_tagger] WARNING: Tesseract not found. Scanned pages will be empty.")
 
@@ -253,32 +296,76 @@ def tag_and_extract_all(
 
     for page_num, text, image in pages:
         if image is None:
-            # ── Text-based page: subject detection only, no OCR ──────────────
+            # ── Pure text-based page: subject detection only, no OCR ─────────
             parsed = tag_text_page(text, known_subjects, page_num)
             ocr_conf = None
             print(f"[ocr_tagger] Page {page_num}: text extraction ({len(text)} chars)")
+        elif text and text.strip():
+            # ── Digital-text page flagged for diagrams/circuits/broken math ──
+            chosen_text = text
+            if vision_available and vision_calls_used < max_vision_pages:
+                vision_text = ocr_page_with_gemini(image, existing_text=text)
+                if vision_text:
+                    vision_calls_used += 1
+                    chosen_text = vision_text
+                    print(f"[ocr_tagger] Page {page_num}: Gemini Vision enhanced digital page ({len(chosen_text)} chars)")
+            del image
+            parsed = tag_text_page(chosen_text, known_subjects, page_num)
+            ocr_conf = None
         else:
-            # ── Scanned page: preprocess → OCR ───────────────────────────────
+            # ── Scanned page: preprocess → Tesseract → smart Gemini fallback ─
             scanned_page_count += 1
 
             if not use_tesseract:
-                if not tesseract_missing_warned:
-                    warnings.append(
-                        "TESSERACT_MISSING: Tesseract OCR binary is not installed. "
-                        "Scanned pages cannot be read. Digital-text PDFs still work normally."
-                    )
-                    tesseract_missing_warned = True
-                # Produce an empty result for this page so we don't break the
-                # page-count loop; digital pages will still be stored correctly.
-                parsed = {"has_new_subject_header": False, "subject": None, "text": ""}
-                ocr_conf = None
+                vision_text = None
+                if vision_available and vision_calls_used < max_vision_pages:
+                    vision_text = ocr_page_with_gemini(image)
+                    if vision_text:
+                        vision_calls_used += 1
                 del image  # free memory even on the error path
+
+                if vision_text:
+                    ocr_conf = 95.0
+                    parsed = tag_text_page(vision_text, known_subjects, page_num)
+                    parsed["ocr_conf"] = ocr_conf
+                else:
+                    if not tesseract_missing_warned:
+                        warnings.append(
+                            "TESSERACT_MISSING: Tesseract OCR binary is not installed. "
+                            "Scanned pages cannot be read. Digital-text PDFs still work normally."
+                        )
+                        tesseract_missing_warned = True
+                    parsed = {"has_new_subject_header": False, "subject": None, "text": ""}
+                    ocr_conf = None
             else:
                 try:
                     preprocessed = preprocess(image)
-                    del image  # free original immediately; preprocessed is small
+                    ocr_page.last_data = None
                     raw_text, mean_conf = ocr_page(preprocessed)
-                    del preprocessed  # free after OCR
+                    ocr_data = getattr(ocr_page, "last_data", None)
+
+                    used_vision = False
+                    if vision_available and vision_calls_used < max_vision_pages:
+                        need_vision, reason = needs_vision_for_scanned_page(
+                            raw_text,
+                            mean_conf,
+                            preprocessed_img=preprocessed,
+                            ocr_data=ocr_data,
+                        )
+                        if need_vision:
+                            vision_text = ocr_page_with_gemini(image)
+                            if vision_text:
+                                vision_calls_used += 1
+                                raw_text = vision_text
+                                mean_conf = max(mean_conf, 95.0)
+                                used_vision = True
+                                print(
+                                    f"[ocr_tagger] Page {page_num}: Gemini Vision fallback "
+                                    f"({reason}) -> {len(raw_text)} chars"
+                                )
+
+                    del preprocessed
+                    del image
 
                     ocr_conf = round(mean_conf, 2)
                     char_count = len(raw_text.strip())
@@ -286,6 +373,7 @@ def tag_and_extract_all(
                     print(
                         f"[ocr_tagger] Page {page_num}: "
                         f"{char_count} chars, conf={mean_conf:.0f}"
+                        f"{' [vision]' if used_vision else ''}"
                     )
 
                     if not raw_text or not raw_text.strip():
@@ -293,7 +381,7 @@ def tag_and_extract_all(
                         parsed = {"has_new_subject_header": False, "subject": None, "text": ""}
                         parsed["ocr_conf"] = ocr_conf
                     else:
-                        if mean_conf < POOR_CONF_THRESHOLD:
+                        if mean_conf < POOR_CONF_THRESHOLD and not used_vision:
                             warnings.append(
                                 f"Page {page_num}: low OCR confidence "
                                 f"({mean_conf:.0f} % — some text may be inaccurate)"
@@ -302,6 +390,10 @@ def tag_and_extract_all(
                         parsed["ocr_conf"] = ocr_conf
 
                 except Exception as tess_err:
+                    try:
+                        del image
+                    except Exception:
+                        pass
                     print(f"[ocr_tagger] Page {page_num}: Tesseract error — {tess_err}")
                     warnings.append(
                         f"Page {page_num}: OCR failed ({type(tess_err).__name__})"
